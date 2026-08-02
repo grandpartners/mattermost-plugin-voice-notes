@@ -1,0 +1,12 @@
+{
+    "id": "corp.osbren.voicenotes",
+    "name": "Voice Notes",
+    "description": "Lightweight voice messages: record, preview and send MP3 voice notes with an inline waveform player.",
+    "homepage_url": "https://github.com/osbren-corp/mattermost-plugin-voice-notes",
+    "support_url": "https://github.com/osbren-corp/mattermost-plugin-voice-notes/issues",
+    "version": "1.1.1",
+    "min_server_version": "10.0.0",
+    "webapp": {
+        "bundle_path": "webapp/dist/main.js"
+    }
+}

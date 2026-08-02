@@ -1,0 +1,13 @@
+{
+  "name": "voice-notes-webapp",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@breezystack/lamejs": "1.2.7"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}
