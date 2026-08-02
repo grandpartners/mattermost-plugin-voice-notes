@@ -1,4 +1,4 @@
-# Voice Notes — Mattermost plugin
+# Voice Notes (Mattermost plugin)
 
 Voice messages for Mattermost. We wanted them in our team chat and the existing options weren't great... the original `mattermost-plugin-voice` has been abandoned since 2022 and doesn't record on modern servers, and the forks that revive it didn't feel good enough to use daily. So I wrote a new one from scratch.
 
