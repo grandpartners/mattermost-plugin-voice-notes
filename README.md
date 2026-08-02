@@ -4,6 +4,8 @@ Voice messages for Mattermost. We wanted them in our team chat and the existing 
 
 It's a webapp-only plugin (no Go server component), the whole tarball is ~70 KB.
 
+![Recording, sending and playing a voice note](assets/demo.gif)
+
 ## What it does
 
 - Record from the attachment menu (📎 → *Voice message*), the `/voice` command or the app bar mic icon.
@@ -30,6 +32,13 @@ Grab the tarball from the releases page and upload it in **System Console → Pl
 
 ```sh
 mmctl plugin add corp.osbren.voicenotes-<version>.tar.gz
+mmctl plugin enable corp.osbren.voicenotes
+```
+
+Or let the server download it directly, always the latest release:
+
+```sh
+mmctl plugin install-url https://github.com/osbren-corp/mattermost-plugin-voice-notes/releases/latest/download/voicenotes.tar.gz
 mmctl plugin enable corp.osbren.voicenotes
 ```
 
