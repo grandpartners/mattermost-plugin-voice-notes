@@ -274,6 +274,17 @@ h1 {
     width: 100%;
 }
 
+.return-link {
+    display: block;
+    margin-top: 12px;
+    color: var(--muted);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
 .success-mark {
     width: 46px;
     height: 46px;

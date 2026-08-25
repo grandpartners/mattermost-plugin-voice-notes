@@ -128,6 +128,9 @@ func TestServeMobileRecorder(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "Voice Notes") {
 		t.Fatal("recorder HTML was not served")
 	}
+	if !strings.Contains(recorder.Body.String(), `id="return-link"`) {
+		t.Fatal("recorder HTML does not expose the app return URL for debugging")
+	}
 	if got := recorder.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 		t.Fatalf("unexpected Content-Security-Policy: %q", got)
 	}
@@ -153,6 +156,9 @@ func TestServeMobileRecorderUsesMP3Encoder(t *testing.T) {
 	}
 	if !strings.Contains(app, "post_status_unknown") || strings.Contains(app, "retry_original") {
 		t.Fatal("mobile recorder can retry an indeterminate CreatePost outcome")
+	}
+	if !strings.Contains(app, "elements.returnLink.href = returnURL") || !strings.Contains(app, "elements.returnLink.textContent = returnURL") {
+		t.Fatal("mobile recorder does not show the returned app permalink")
 	}
 	if !strings.Contains(app, "const appendLivePeak") || !strings.Contains(app, "bars.shift()") || strings.Contains(app, "samples.slice(-BAR_COUNT)") {
 		t.Fatal("live waveform does not preserve bar heights while scrolling")

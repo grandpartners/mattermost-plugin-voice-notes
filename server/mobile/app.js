@@ -70,7 +70,7 @@
         sentActions: document.getElementById('sent-actions'), record: document.getElementById('record'),
         cancel: document.getElementById('cancel'), stop: document.getElementById('stop'),
         discard: document.getElementById('discard'), send: document.getElementById('send'),
-        openApp: document.getElementById('open-app'),
+        openApp: document.getElementById('open-app'), returnLink: document.getElementById('return-link'),
     };
 
     const bars = [];
@@ -413,6 +413,8 @@
             }
             token = '';
             returnURL = payload.return_url || 'mattermost://';
+            elements.returnLink.href = returnURL;
+            elements.returnLink.textContent = returnURL;
             elements.preview.pause();
             setPhase('sent');
         } catch (error) {
