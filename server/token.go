@@ -88,9 +88,10 @@ func (s *tokenStore) issue(target recorderTarget) (string, error) {
 	return token, nil
 }
 
-// claim atomically reserves a token for one send request. Failed sends release
-// the reservation so the user can retry; successful sends permanently redeem
-// it with complete.
+// claim atomically reserves a token for one send request. Handled failures try
+// to release the reservation so the user can retry. A process or later KV
+// failure can leave the token reserved until expiry, preserving one-time
+// semantics at the cost of retry availability.
 func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 	if len(token) != 43 {
 		return nil, errInvalidToken

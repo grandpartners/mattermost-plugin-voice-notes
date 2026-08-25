@@ -130,7 +130,16 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if api == nil || !hasRecorderPermissions(api, target.UserID, target.ChannelID) {
+	if api == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "the voice recorder is temporarily unavailable")
+		return
+	}
+	user, appErr := api.GetUser(target.UserID)
+	if appErr != nil || user == nil || user.DeleteAt != 0 {
+		writeJSONError(w, http.StatusForbidden, "the Mattermost user for this recorder link is no longer active")
+		return
+	}
+	if !hasRecorderPermissions(api, target.UserID, target.ChannelID) {
 		writeJSONError(w, http.StatusForbidden, "you no longer have permission to post files in this channel")
 		return
 	}

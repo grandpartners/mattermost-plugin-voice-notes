@@ -18,9 +18,11 @@ import (
 type fakeMattermostAPI struct {
 	created         *model.Post
 	locale          string
+	userDeleteAt    int64
 	denyPermissions bool
 	failUpload      bool
 	failCreate      bool
+	getUserCalls    int
 	uploadCalls     int
 	createCalls     int
 	pendingPostIDs  []string
@@ -49,11 +51,12 @@ func (f *fakeMattermostAPI) GetConfig() *model.Config {
 	return &model.Config{ServiceSettings: model.ServiceSettings{SiteURL: &siteURL}}
 }
 func (f *fakeMattermostAPI) GetUser(_ string) (*model.User, *model.AppError) {
+	f.getUserCalls++
 	locale := f.locale
 	if locale == "" {
 		locale = "en"
 	}
-	return &model.User{Locale: locale}, nil
+	return &model.User{Locale: locale, DeleteAt: f.userDeleteAt}, nil
 }
 func (f *fakeMattermostAPI) HasPermissionToChannel(_, _ string, _ *model.Permission) bool {
 	return !f.denyPermissions
@@ -245,6 +248,35 @@ func TestMobileSendRechecksPermissionsAndReleasesToken(t *testing.T) {
 	}
 
 	api.denyPermissions = false
+	retryRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, retryRecorder, newWebMUploadRequest(t, token))
+	if retryRecorder.Code != http.StatusCreated {
+		t.Fatalf("retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
+	}
+}
+
+func TestMobileSendRejectsDeactivatedUserAndReleasesToken(t *testing.T) {
+	api := &fakeMattermostAPI{userDeleteAt: 1}
+	store := newTokenStore(nil)
+	p := &Plugin{api: api, tokens: store}
+	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	deactivatedRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, deactivatedRecorder, newWebMUploadRequest(t, token))
+	if deactivatedRecorder.Code != http.StatusForbidden {
+		t.Fatalf("deactivated status = %d, want %d; body: %s", deactivatedRecorder.Code, http.StatusForbidden, deactivatedRecorder.Body.String())
+	}
+	if api.getUserCalls != 1 {
+		t.Fatalf("GetUser calls = %d, want 1", api.getUserCalls)
+	}
+	if api.uploadCalls != 0 || api.createCalls != 0 {
+		t.Fatalf("deactivated user caused side effects: upload = %d, create = %d", api.uploadCalls, api.createCalls)
+	}
+
+	api.userDeleteAt = 0
 	retryRecorder := httptest.NewRecorder()
 	p.ServeHTTP(nil, retryRecorder, newWebMUploadRequest(t, token))
 	if retryRecorder.Code != http.StatusCreated {
