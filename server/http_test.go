@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -17,17 +16,18 @@ import (
 )
 
 type fakeMattermostAPI struct {
-	created         *model.Post
-	locale          string
-	userDeleteAt    int64
-	denyPermissions bool
-	failUpload      bool
-	failCreate      bool
-	getUserCalls    int
-	uploadCalls     int
-	createCalls     int
-	pendingPostIDs  []string
-	warnings        []string
+	created                *model.Post
+	locale                 string
+	userDeleteAt           int64
+	denyPermissions        bool
+	failUpload             bool
+	failCreate             bool
+	persistOnCreateFailure bool
+	getUserCalls           int
+	uploadCalls            int
+	createCalls            int
+	pendingPostIDs         []string
+	warnings               []string
 }
 
 type blockingUploadAPI struct {
@@ -74,6 +74,10 @@ func (f *fakeMattermostAPI) CreatePost(post *model.Post) (*model.Post, *model.Ap
 	f.createCalls++
 	f.pendingPostIDs = append(f.pendingPostIDs, post.PendingPostId)
 	if f.failCreate {
+		if f.persistOnCreateFailure {
+			f.created = post
+			post.Id = "created-despite-error-post-id"
+		}
 		return nil, model.NewAppError("test", "create failed", nil, "", http.StatusInternalServerError)
 	}
 	f.created = post
@@ -125,6 +129,9 @@ func TestServeMobileRecorderUsesMP3Encoder(t *testing.T) {
 	}
 	if !strings.Contains(app, mobileTokenHeader) || strings.Contains(app, "Authorization") {
 		t.Fatal("mobile recorder does not use its plugin-specific capability header")
+	}
+	if !strings.Contains(app, "post_status_unknown") || strings.Contains(app, "retry_original") {
+		t.Fatal("mobile recorder can retry an indeterminate CreatePost outcome")
 	}
 
 	encoderRecorder := httptest.NewRecorder()
@@ -219,8 +226,8 @@ func TestMobileSendSurvivesMattermostAuthorizationSanitization(t *testing.T) {
 	}
 }
 
-func TestMobileSendReusesUploadAfterCreatePostFailure(t *testing.T) {
-	api := &fakeMattermostAPI{failCreate: true}
+func TestMobileSendDoesNotRetryWhenCreatePostOutcomeIsUnknown(t *testing.T) {
+	api := &fakeMattermostAPI{failCreate: true, persistOnCreateFailure: true}
 	store := newTokenStore(nil)
 	p := &Plugin{api: api, tokens: store}
 	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
@@ -236,71 +243,28 @@ func TestMobileSendReusesUploadAfterCreatePostFailure(t *testing.T) {
 	if api.uploadCalls != 1 || api.createCalls != 1 {
 		t.Fatalf("first attempt calls: upload = %d, create = %d", api.uploadCalls, api.createCalls)
 	}
-
-	api.failCreate = false
-	secondRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, secondRecorder, newMP3UploadRequest(t, token))
-	if secondRecorder.Code != http.StatusCreated {
-		t.Fatalf("retry status = %d, want %d; body: %s", secondRecorder.Code, http.StatusCreated, secondRecorder.Body.String())
-	}
-	if api.uploadCalls != 1 {
-		t.Fatalf("retry uploaded another file; upload calls = %d, want 1", api.uploadCalls)
-	}
-	if api.createCalls != 2 {
-		t.Fatalf("create calls = %d, want 2", api.createCalls)
-	}
-	if len(api.pendingPostIDs) != 2 || api.pendingPostIDs[0] == "" || api.pendingPostIDs[0] != api.pendingPostIDs[1] {
-		t.Fatalf("pending post IDs are not stable across retry: %#v", api.pendingPostIDs)
-	}
-	if len(api.warnings) == 0 {
-		t.Fatal("CreatePost failure was not logged for orphan-file diagnostics")
-	}
-}
-
-func TestMobileSendRejectsDifferentRecordingAfterCreatePostFailure(t *testing.T) {
-	api := &fakeMattermostAPI{failCreate: true}
-	store := newTokenStore(nil)
-	p := &Plugin{api: api, tokens: store}
-	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
-	if err != nil {
-		t.Fatalf("issue token: %v", err)
-	}
-
-	originalAudio := []byte{0xff, 0xfb, 0x90, 0x01}
-	firstRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, firstRecorder, newMP3UploadRequestWith(t, token, originalAudio, "4200", []float64{0.1, 0.2, 0.3, 0.4, 0.5}, "ru"))
-	if firstRecorder.Code != http.StatusBadGateway {
-		t.Fatalf("first status = %d, want %d; body: %s", firstRecorder.Code, http.StatusBadGateway, firstRecorder.Body.String())
-	}
 	var failure map[string]any
-	if err = json.Unmarshal(firstRecorder.Body.Bytes(), &failure); err != nil || failure["retry_original"] != true {
-		t.Fatalf("first failure did not lock the original recording: %s", firstRecorder.Body.String())
+	if err = json.Unmarshal(firstRecorder.Body.Bytes(), &failure); err != nil || failure["post_status_unknown"] != true {
+		t.Fatalf("first failure did not report an unknown post status: %s", firstRecorder.Body.String())
+	}
+	if _, exists := failure["retry_original"]; exists {
+		t.Fatalf("first failure offered an unsafe retry: %s", firstRecorder.Body.String())
+	}
+	if api.created == nil || api.created.Id != "created-despite-error-post-id" {
+		t.Fatal("test did not simulate a post persisted before the CreatePost error")
 	}
 
 	api.failCreate = false
-	mismatchRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, mismatchRecorder, newMP3UploadRequestWith(t, token, []byte{0xff, 0xfb, 0x90, 0x02}, "9000", []float64{0.9, 0.8, 0.7, 0.6, 0.5}, "en"))
-	if mismatchRecorder.Code != http.StatusConflict {
-		t.Fatalf("mismatch status = %d, want %d; body: %s", mismatchRecorder.Code, http.StatusConflict, mismatchRecorder.Body.String())
+	retryRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequest(t, token))
+	if retryRecorder.Code != http.StatusConflict {
+		t.Fatalf("retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusConflict, retryRecorder.Body.String())
 	}
 	if api.uploadCalls != 1 || api.createCalls != 1 {
-		t.Fatalf("mismatched retry caused side effects: upload = %d, create = %d", api.uploadCalls, api.createCalls)
+		t.Fatalf("retry caused duplicate side effects: upload = %d, create = %d", api.uploadCalls, api.createCalls)
 	}
-
-	retryRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequestWith(t, token, originalAudio, "9000", []float64{0.9, 0.8, 0.7, 0.6, 0.5}, "en"))
-	if retryRecorder.Code != http.StatusCreated {
-		t.Fatalf("original retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
-	}
-	if api.created == nil || api.created.Message != "🎤 Голосовое сообщение (0:04)" {
-		t.Fatalf("retry did not preserve original metadata: %#v", api.created)
-	}
-	if got := api.created.GetProps()["duration"]; got != int64(4200) {
-		t.Fatalf("retry duration = %#v, want original duration 4200", got)
-	}
-	wantPeaks := []float64{0.1, 0.2, 0.3, 0.4, 0.5}
-	if got := api.created.GetProps()["peaks"]; !reflect.DeepEqual(got, wantPeaks) {
-		t.Fatalf("retry waveform = %#v, want original waveform %#v", got, wantPeaks)
+	if len(api.warnings) == 0 {
+		t.Fatal("indeterminate CreatePost outcome was not logged")
 	}
 }
 

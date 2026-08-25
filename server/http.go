@@ -126,9 +126,9 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	completed := false
+	releaseClaim := true
 	defer func() {
-		if !completed {
+		if releaseClaim {
 			if releaseErr := tokens.release(claim); releaseErr != nil && api != nil {
 				api.LogWarn("Could not release mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "error", releaseErr.Error())
 			}
@@ -211,22 +211,26 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 			"peaks":         payload.peaks,
 		},
 	}
+	// Once CreatePost starts, an error does not prove that no post was stored:
+	// Mattermost can fail during work performed after the database insert. Do
+	// not release the capability from this point on, because retrying with the
+	// same PendingPostId is not guaranteed to deduplicate that outcome.
+	releaseClaim = false
 	created, appErr := api.CreatePost(post)
 	if appErr != nil || created == nil {
 		api.LogWarn(
-			"Could not create a post for an uploaded mobile voice note; Mattermost orphan-file cleanup may remove the file",
+			"Could not confirm creation of a post for an uploaded mobile voice note; the recorder token will remain reserved to prevent a duplicate",
 			"file_id", fileID,
 			"pending_post_id", claim.record.PendingPostID,
 			"error", fmt.Sprint(appErr),
 		)
 		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"message":        "Mattermost could not create the voice message",
-			"retry_original": true,
+			"message":             "Mattermost could not confirm whether the voice message was created; check the channel before recording again",
+			"post_status_unknown": true,
 		})
 		return
 	}
 
-	completed = true
 	if err = tokens.complete(claim); err != nil {
 		api.LogWarn("Could not permanently redeem mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "post_id", created.Id, "error", err.Error())
 	}

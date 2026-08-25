@@ -92,10 +92,11 @@ func (s *tokenStore) issue(target recorderTarget) (string, error) {
 	return token, nil
 }
 
-// claim atomically reserves a token for one send request. Handled failures try
-// to release the reservation so the user can retry. A process or later KV
-// failure can leave the token reserved until expiry, preserving one-time
-// semantics at the cost of retry availability.
+// claim atomically reserves a token for one send request. Handled failures
+// before CreatePost try to release the reservation so the user can retry. A
+// process failure, a later KV failure, or any CreatePost attempt can leave the
+// token reserved until expiry, preserving one-time semantics at the cost of
+// retry availability.
 func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 	if len(token) != 43 {
 		return nil, errInvalidToken
@@ -144,8 +145,8 @@ func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 }
 
 // attachFile saves the uploaded file and its immutable post metadata on the
-// claimed token. If CreatePost fails, a retry can only reuse this exact audio
-// and the post is rebuilt from the original metadata.
+// claimed token. The claim must not be released after CreatePost is attempted,
+// because an error from that call can still mean the post was stored.
 func (s *tokenStore) attachFile(claim *tokenClaim, fileID, audioSHA256 string, durationMS int64, peaks []float64, language string) error {
 	if claim == nil || fileID == "" || audioSHA256 == "" || durationMS <= 0 || len(peaks) == 0 {
 		return fmt.Errorf("invalid recorder token file state")

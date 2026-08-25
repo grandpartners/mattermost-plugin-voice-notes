@@ -17,7 +17,7 @@
             denied: 'Microphone access is blocked. Allow it in your browser or system settings.',
             failed: 'Could not start recording.', interrupted: 'Recording was interrupted. Please try again.',
             tooLong: 'The recording exceeded 5 minutes and was discarded.', sendFailed: 'The voice message could not be sent.',
-            retryOriginal: 'The recording was uploaded, but the message was not created. Retry the same recording.',
+            sendUncertain: 'Mattermost could not confirm whether the message was sent. Check the channel before recording again.',
             retryMismatch: 'This link is tied to an earlier recording. Run /voice again to record a new message.',
         },
         ru: {
@@ -30,7 +30,7 @@
             denied: 'Доступ к микрофону заблокирован. Разрешите его в настройках браузера или системы.',
             failed: 'Не удалось начать запись.', interrupted: 'Запись была прервана. Попробуйте ещё раз.',
             tooLong: 'Запись превысила 5 минут и была удалена.', sendFailed: 'Не удалось отправить голосовое сообщение.',
-            retryOriginal: 'Запись загружена, но сообщение не создано. Повторите отправку этой же записи.',
+            sendUncertain: 'Mattermost не подтвердил отправку сообщения. Проверьте канал перед новой записью.',
             retryMismatch: 'Ссылка привязана к предыдущей записи. Выполните /voice ещё раз для нового сообщения.',
         },
         es: {
@@ -43,7 +43,7 @@
             denied: 'El micrófono está bloqueado. Permítelo en los ajustes del navegador o del sistema.',
             failed: 'No se pudo empezar a grabar.', interrupted: 'La grabación se interrumpió. Inténtalo de nuevo.',
             tooLong: 'La grabación superó los 5 minutos y se descartó.', sendFailed: 'No se pudo enviar el mensaje de voz.',
-            retryOriginal: 'La grabación se subió, pero el mensaje no se creó. Reintenta con la misma grabación.',
+            sendUncertain: 'Mattermost no pudo confirmar el envío. Revisa el canal antes de volver a grabar.',
             retryMismatch: 'Este enlace está vinculado a una grabación anterior. Ejecuta /voice de nuevo.',
         },
     };
@@ -96,7 +96,6 @@
     let returnURL = 'mattermost://';
     let recording = false;
     let stopping = false;
-    let retryLocked = false;
 
     const formatDuration = (milliseconds) => {
         const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -149,8 +148,8 @@
         elements.waveform.hidden = phase === 'sent';
         elements.waveform.classList.toggle('recording', phase === 'recording');
         elements.statusText.textContent = t[phase] || t.ready;
-        elements.send.disabled = phase === 'sending';
-        elements.discard.disabled = phase === 'sending' || retryLocked;
+        elements.send.disabled = phase === 'sending' || !token;
+        elements.discard.disabled = phase === 'sending';
         elements.error.hidden = true;
     };
 
@@ -301,7 +300,6 @@
             sampleCount = 0;
             recording = true;
             stopping = false;
-            retryLocked = false;
             elements.stop.disabled = false;
             elements.cancel.disabled = false;
             processor.onaudioprocess = (event) => ingestAudio(event.inputBuffer.getChannelData(0));
@@ -345,10 +343,6 @@
     };
 
     const discardRecording = () => {
-        if (retryLocked) {
-            showError(t.retryOriginal);
-            return;
-        }
         recording = false;
         stopping = true;
         cleanupCapture();
@@ -396,9 +390,9 @@
                 // Use the localized fallback below.
             }
             if (!response.ok) {
-                if (payload.retry_original) {
-                    retryLocked = true;
-                    throw new Error(t.retryOriginal);
+                if (payload.post_status_unknown) {
+                    token = '';
+                    throw new Error(t.sendUncertain);
                 }
                 if (payload.retry_mismatch) {
                     token = '';
