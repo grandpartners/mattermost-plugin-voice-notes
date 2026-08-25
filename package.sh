@@ -17,8 +17,10 @@ for target in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64; d
 done
 
 VERSION=$(node -p "require('./plugin.json').version")
-rm -rf dist && mkdir -p dist/corp.osbren.voicenotes/webapp/dist dist/corp.osbren.voicenotes/server
+rm -rf dist && mkdir -p dist/corp.osbren.voicenotes/webapp/dist dist/corp.osbren.voicenotes/server dist/corp.osbren.voicenotes/LICENSES
 cp plugin.json dist/corp.osbren.voicenotes/
+cp LICENSE THIRD_PARTY_NOTICES.md dist/corp.osbren.voicenotes/
+cp LICENSES/LGPL-3.0.txt dist/corp.osbren.voicenotes/LICENSES/
 cp webapp/dist/main.js dist/corp.osbren.voicenotes/webapp/dist/
 cp -R server/dist dist/corp.osbren.voicenotes/server/
 
