@@ -20,7 +20,20 @@ A couple of notes on the boring-but-important parts:
 
 - Post props are sender-controlled, so the player sanitizes them before rendering (file id format, peak count and range, duration).
 - Capture uses `ScriptProcessorNode` on purpose. AudioWorklet needs its module fetched as a script, and Mattermost's CSP (`script-src 'self'`) blocks `blob:` and `data:` URLs... a webapp-only plugin has no same-origin file to serve, so the deprecated API is the one that actually works everywhere.
-- Mattermost Mobile does not run third-party plugin webapp bundles. The server-side `/voice` command bridges that gap with a standalone recorder based on the browser's native `MediaRecorder`; it uploads M4A on Safari/iOS and WebM on supported Chromium browsers. The link token stays in the URL fragment, is stored server-side only as a hash, and is redeemed after a successful send.
+
+## Mobile app support
+
+Mattermost Mobile does not load third-party plugin webapp bundles. As a result, the original webapp-only plugin could play existing voice notes on mobile but could not register a working mobile recorder. Registering `/voice` on the server alone would make the command available, but it would still provide no recording interface.
+
+This plugin solves that limitation with a small Go server component and a standalone mobile recorder:
+
+1. Run `/voice` in a channel or thread in the Mattermost mobile app.
+2. The server responds only to you with a private recorder link. The link expires after 20 minutes and can send one voice note.
+3. The recorder opens in the browser or Mattermost in-app browser and uses the native `MediaRecorder` API. It supports a five-minute recording, live waveform, preview, discard and send actions in English, Russian and Spanish.
+4. The server uploads the recording as M4A on Safari/iOS or WebM on supported Chromium browsers and creates a regular `custom_voice` post in the channel and thread where `/voice` was run.
+5. After a successful send, the recorder provides a `mattermost://` link back to the app.
+
+The recorder link carries its token in the URL fragment, so the token is not sent in the initial HTTP request. Only its SHA-256 hash is stored by the server. Sending claims the token atomically across Mattermost nodes; failed uploads release it for another attempt, while a successful send permanently redeems it. Channel access, post creation and file-upload permissions are checked again immediately before upload.
 
 ## Requirements
 
@@ -63,6 +76,10 @@ go mod download
 Packaging requires Go 1.24.13 and Node.js. It cross-compiles the server component for Linux (amd64/arm64), macOS (amd64/arm64) and Windows (amd64).
 
 Pushing a `vX.Y.Z` tag builds and publishes the release automatically.
+
+## Development
+
+The mobile app support task described above was completed by the [synthstack.ai](https://synthstack.ai) platform.
 
 ## License
 
