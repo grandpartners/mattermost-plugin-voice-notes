@@ -233,10 +233,34 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 	if err = tokens.complete(claim); err != nil {
 		api.LogWarn("Could not permanently redeem mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "post_id", created.Id, "error", err.Error())
 	}
+	returnURL, err := mobilePostDeepLink(api, target.TeamID, created.Id)
+	if err != nil {
+		api.LogWarn(
+			"Could not build a permalink for a created mobile voice note; falling back to the Mattermost app root",
+			"team_id", target.TeamID,
+			"post_id", created.Id,
+			"error", err.Error(),
+		)
+		returnURL = "mattermost://"
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"post_id":    created.Id,
-		"return_url": "mattermost://",
+		"return_url": returnURL,
 	})
+}
+
+func mobilePostDeepLink(api mattermostAPI, teamID, postID string) (string, error) {
+	if teamID == "" {
+		return "", fmt.Errorf("team ID is missing")
+	}
+	team, appErr := api.GetTeam(teamID)
+	if appErr != nil {
+		return "", fmt.Errorf("get team: %w", appErr)
+	}
+	if team == nil || team.Name == "" {
+		return "", fmt.Errorf("team is unavailable")
+	}
+	return mattermostPostDeepLink(api.GetConfig(), team.Name, postID)
 }
 
 func parseMobilePayload(r *http.Request) (mobilePayload, int, error) {

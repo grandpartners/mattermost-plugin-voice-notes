@@ -18,6 +18,7 @@ type mattermostAPI interface {
 	LogWarn(msg string, keyValuePairs ...any)
 	GetConfig() *model.Config
 	GetUser(userID string) (*model.User, *model.AppError)
+	GetTeam(teamID string) (*model.Team, *model.AppError)
 	HasPermissionToChannel(userID, channelID string, permission *model.Permission) bool
 	GetPost(postID string) (*model.Post, *model.AppError)
 	UploadFile(data []byte, channelID, filename string) (*model.FileInfo, *model.AppError)
@@ -179,6 +180,25 @@ func configuredSiteURL(config *model.Config) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func mattermostPostDeepLink(config *model.Config, teamName, postID string) (string, error) {
+	if teamName == "" || postID == "" {
+		return "", fmt.Errorf("team name and post ID are required")
+	}
+
+	siteURL, err := configuredSiteURL(config)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(siteURL)
+	if err != nil {
+		return "", fmt.Errorf("parse SiteURL: %w", err)
+	}
+	u.Scheme = "mattermost"
+	u.Path = strings.TrimRight(u.Path, "/") + "/" + teamName + "/pl/" + postID
+	u.RawPath = ""
+	return u.String(), nil
 }
 
 func commandError(message string) *model.CommandResponse {
