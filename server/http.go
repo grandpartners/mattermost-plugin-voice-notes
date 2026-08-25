@@ -10,7 +10,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -234,16 +233,9 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 	if err = tokens.complete(claim); err != nil {
 		api.LogWarn("Could not permanently redeem mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "post_id", created.Id, "error", err.Error())
 	}
-	returnURL := "mattermost://"
-	if siteURL, siteErr := configuredSiteURL(api.GetConfig()); siteErr == nil {
-		if parsed, parseErr := url.Parse(siteURL); parseErr == nil {
-			parsed.Scheme = "mattermost"
-			returnURL = parsed.String()
-		}
-	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"post_id":    created.Id,
-		"return_url": returnURL,
+		"return_url": "mattermost://",
 	})
 }
 

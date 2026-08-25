@@ -86,9 +86,13 @@ h1 {
     line-height: 1.4;
 }
 
+.status,
+.sent {
+    margin-top: 31px;
+}
+
 .status {
     min-height: 22px;
-    margin-top: 31px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -325,7 +329,8 @@ h1 {
         box-shadow: none;
     }
 
-    .status {
+    .status,
+    .sent {
         margin-top: 12vh;
     }
 }

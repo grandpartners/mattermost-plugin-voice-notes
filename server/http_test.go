@@ -193,6 +193,13 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 	if api.created.PendingPostId == "" {
 		t.Fatal("voice post has no pending post ID for retry deduplication")
 	}
+	var response map[string]string
+	if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["return_url"] != "mattermost://" {
+		t.Fatalf("return_url = %q, want Mattermost app root", response["return_url"])
+	}
 
 	replay := newMP3UploadRequest(t, token)
 	replayRecorder := httptest.NewRecorder()
