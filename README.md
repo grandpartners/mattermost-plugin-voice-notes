@@ -11,14 +11,14 @@ The web and desktop recorder runs directly in Mattermost. On mobile, where Matte
 - Record from the attachment menu (📎 → *Voice message*), the `/voice` command or the app bar mic icon. In the Mattermost mobile app, `/voice` returns a private recorder link that works for 20 minutes and can send one note.
 - On web and desktop, audio is encoded to MP3 while you record (mono, 64 kbps), so when you stop there's no wait, the file is already there.
 - You can listen and seek before sending, or send directly while recording. Enter sends, Esc cancels (unless you're typing in a text field, your keystrokes are yours).
-- Sent notes get an inline player with the real waveform of the recording (the peaks travel in the post props), click/drag to seek, 1×/1.5×/2× playback speed (remembered), and a download link. Only one note plays at a time.
+- Sent notes get an inline player with waveform peaks calculated in the recorder (the peaks travel in the post props), click/drag to seek, 1×/1.5×/2× playback speed (remembered), and a download link. Only one note plays at a time.
 - The note goes to the channel/thread that was active when you opened the recorder, and a chip lets you switch between thread and channel before sending.
 - Light/dark theme (Mattermost CSS variables). The web recorder supports English and Spanish; the mobile recorder supports English, Russian and Spanish.
 - Posts created by the old `mattermost-plugin-voice` render fine too (same `custom_voice` post type).
 
 A couple of notes on the boring-but-important parts:
 
-- Post props are sender-controlled, so the player sanitizes them before rendering (file id format, peak count and range, duration).
+- Post props are sender-controlled, so the player sanitizes them before rendering (file ID format, peak count and range, duration). The server checks mobile waveform peaks for count and range but does not derive or verify them against the audio.
 - Capture uses `ScriptProcessorNode` on purpose. AudioWorklet needs its module fetched as a script, and Mattermost's CSP (`script-src 'self'`) blocks `blob:` and `data:` URLs... a webapp-only plugin has no same-origin file to serve, so the deprecated API is the one that actually works everywhere.
 
 ## Mobile app support
@@ -29,11 +29,13 @@ This plugin solves that limitation with a small Go server component and a standa
 
 1. Run `/voice` in a channel or thread in the Mattermost mobile app.
 2. The server responds only to you with a private recorder link. The link expires after 20 minutes and can send one voice note.
-3. The recorder opens in the browser or Mattermost in-app browser and uses the native `MediaRecorder` API. It supports a five-minute recording, live waveform, preview, discard and send actions in English, Russian and Spanish.
-4. The server uploads the recording as M4A on Safari/iOS or WebM on supported Chromium browsers and creates a regular `custom_voice` post in the channel and thread where `/voice` was run.
+3. The recorder opens in the browser or Mattermost in-app browser and uses the native `MediaRecorder` API. It applies a five-minute client-side recording limit, stops capture if the page is hidden, and supports live waveform, preview, discard and send actions in English, Russian and Spanish.
+4. The recorder prefers MP4/M4A when the browser reports it as supported and falls back to WebM. The server uploads the result and creates a regular `custom_voice` post in the channel and thread where `/voice` was run.
 5. After a successful send, the recorder provides a `mattermost://` link back to the app.
 
-The recorder link carries its token in the URL fragment, so the token is not sent in the initial HTTP request. Only its SHA-256 hash is stored by the server. Sending claims the token atomically across Mattermost nodes; failed uploads release it for another attempt, while a successful send permanently redeems it. Channel access, post creation and file-upload permissions are checked again immediately before upload.
+The recorder link carries its token in the URL fragment, so the token is not sent in the initial HTTP request. Only a SHA-256 hash of the usable bearer token is stored by the server. Sending claims the token atomically across Mattermost nodes; after a failed send the server attempts to release it for another attempt, while a successful send permanently redeems it. If file upload succeeds but post creation fails, a retry reuses the stored file and a stable `PendingPostId`; failures are logged so any file left without a post can be diagnosed while Mattermost's normal orphan-file cleanup handles it. Channel access, post creation and file-upload permissions are checked again immediately before upload.
+
+The server rejects uploads larger than 32 MB, unsupported container signatures and declared durations over five minutes (with a one-second stop tolerance). It does not decode M4A/WebM media metadata, so the duration limit protects the normal recorder flow rather than acting as a strict content-verification boundary for a deliberately crafted upload.
 
 ## Requirements
 

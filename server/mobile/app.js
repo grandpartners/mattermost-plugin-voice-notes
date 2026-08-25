@@ -12,7 +12,8 @@
             noToken: 'This recorder link is invalid or has already been used.',
             unsupported: 'Voice recording is not supported by this browser.',
             denied: 'Microphone access is blocked. Allow it in your browser or system settings.',
-            failed: 'Could not start recording.', sendFailed: 'The voice message could not be sent.',
+            failed: 'Could not start recording.', interrupted: 'Recording was interrupted. Please try again.',
+            tooLong: 'The recording exceeded 5 minutes and was discarded.', sendFailed: 'The voice message could not be sent.',
         },
         ru: {
             subtitle: 'Запишите голосовое сообщение для Mattermost', ready: 'Готово к записи', recording: 'Идёт запись…',
@@ -22,7 +23,8 @@
             noToken: 'Ссылка недействительна или уже была использована.',
             unsupported: 'Этот браузер не поддерживает запись голоса.',
             denied: 'Доступ к микрофону заблокирован. Разрешите его в настройках браузера или системы.',
-            failed: 'Не удалось начать запись.', sendFailed: 'Не удалось отправить голосовое сообщение.',
+            failed: 'Не удалось начать запись.', interrupted: 'Запись была прервана. Попробуйте ещё раз.',
+            tooLong: 'Запись превысила 5 минут и была удалена.', sendFailed: 'Не удалось отправить голосовое сообщение.',
         },
         es: {
             subtitle: 'Graba un mensaje de voz para Mattermost', ready: 'Listo para grabar', recording: 'Grabando…',
@@ -32,7 +34,8 @@
             noToken: 'Este enlace no es válido o ya se ha utilizado.',
             unsupported: 'Este navegador no permite grabar voz.',
             denied: 'El micrófono está bloqueado. Permítelo en los ajustes del navegador o del sistema.',
-            failed: 'No se pudo empezar a grabar.', sendFailed: 'No se pudo enviar el mensaje de voz.',
+            failed: 'No se pudo empezar a grabar.', interrupted: 'La grabación se interrumpió. Inténtalo de nuevo.',
+            tooLong: 'La grabación superó los 5 minutos y se descartó.', sendFailed: 'No se pudo enviar el mensaje de voz.',
         },
     };
 
@@ -74,7 +77,9 @@
     let audioContext = null;
     let analyser = null;
     let animationFrame = null;
+    let durationTimer = null;
     let startedAt = 0;
+    let stopRequestedAt = 0;
     let chunks = [];
     let samples = [];
     let recordingResult = null;
@@ -139,6 +144,10 @@
             cancelAnimationFrame(animationFrame);
             animationFrame = null;
         }
+        if (durationTimer !== null) {
+            clearTimeout(durationTimer);
+            durationTimer = null;
+        }
         if (stream) {
             stream.getTracks().forEach((track) => track.stop());
             stream = null;
@@ -148,6 +157,61 @@
         }
         audioContext = null;
         analyser = null;
+    };
+
+    const failCapture = (message, recorder = mediaRecorder) => {
+        if (recorder && recorder === mediaRecorder) {
+            mediaRecorder = null;
+            if (recorder.state === 'recording') {
+                try {
+                    recorder.stop();
+                } catch (_) {
+                    // The recorder has already been stopped by the browser.
+                }
+            }
+        }
+        cleanupCapture();
+        recordingResult = null;
+        chunks = [];
+        samples = [];
+        startedAt = 0;
+        stopRequestedAt = 0;
+        stopping = false;
+        elements.timer.textContent = '0:00';
+        renderWaveform([]);
+        setPhase('ready');
+        showError(message);
+    };
+
+    const finalizeRecording = (recorder) => {
+        if (recorder !== mediaRecorder) {
+            return;
+        }
+        const durationMS = Math.max(1, Math.round((stopRequestedAt || performance.now()) - startedAt));
+        if (durationMS > MAX_DURATION_MS + 1000) {
+            failCapture(t.tooLong, recorder);
+            return;
+        }
+
+        const mimeType = normalizedMimeType(recorder.mimeType);
+        const blob = new Blob(chunks, {type: mimeType});
+        if (!mimeType || !blob.size) {
+            failCapture(t.interrupted, recorder);
+            return;
+        }
+        const peaks = downsample(samples);
+        recordingResult = {blob, durationMS, peaks, mimeType};
+        if (previewURL) {
+            URL.revokeObjectURL(previewURL);
+        }
+        previewURL = URL.createObjectURL(blob);
+        elements.preview.src = previewURL;
+        elements.timer.textContent = formatDuration(durationMS);
+        renderWaveform(peaks);
+        mediaRecorder = null;
+        cleanupCapture();
+        stopping = false;
+        setPhase('preview');
     };
 
     const chooseMimeType = () => {
@@ -240,20 +304,46 @@
             chunks = [];
             samples = [];
             stopping = false;
+            stopRequestedAt = 0;
             elements.stop.disabled = false;
             elements.cancel.disabled = false;
-            mediaRecorder.addEventListener('dataavailable', (event) => {
+            const recorder = mediaRecorder;
+            recorder.addEventListener('dataavailable', (event) => {
                 if (event.data && event.data.size) {
                     chunks.push(event.data);
                 }
             });
-            mediaRecorder.start(250);
+            recorder.addEventListener('error', () => {
+                if (recorder === mediaRecorder) {
+                    failCapture(t.interrupted, recorder);
+                }
+            }, {once: true});
+            recorder.addEventListener('stop', () => {
+                if (recorder !== mediaRecorder) {
+                    return;
+                }
+                if (!stopping) {
+                    failCapture(t.interrupted, recorder);
+                    return;
+                }
+                finalizeRecording(recorder);
+            }, {once: true});
+            stream.getAudioTracks().forEach((track) => {
+                track.addEventListener('ended', () => {
+                    if (recorder === mediaRecorder && !stopping) {
+                        failCapture(t.interrupted, recorder);
+                    }
+                }, {once: true});
+            });
+            recorder.start(250);
             startedAt = performance.now();
+            durationTimer = window.setTimeout(stopRecording, MAX_DURATION_MS);
             elements.timer.textContent = '0:00';
             renderWaveform([]);
             setPhase('recording');
             animationFrame = requestAnimationFrame(updateMeter);
         } catch (error) {
+            mediaRecorder = null;
             cleanupCapture();
             const denied = error && (error.name === 'NotAllowedError' || error.name === 'SecurityError');
             showError(denied ? t.denied : (error && error.message === 'unsupported-mime' ? t.unsupported : t.failed));
@@ -267,31 +357,27 @@
             return;
         }
         stopping = true;
+        stopRequestedAt = performance.now();
         elements.stop.disabled = true;
         elements.cancel.disabled = true;
         const recorder = mediaRecorder;
-        const durationMS = Math.min(MAX_DURATION_MS, Math.max(1, Math.round(performance.now() - startedAt)));
-        recorder.addEventListener('stop', () => {
-            const mimeType = normalizedMimeType(recorder.mimeType);
-            const blob = new Blob(chunks, {type: mimeType});
-            const peaks = downsample(samples);
-            recordingResult = {blob, durationMS, peaks, mimeType};
-            if (previewURL) {
-                URL.revokeObjectURL(previewURL);
-            }
-            previewURL = URL.createObjectURL(blob);
-            elements.preview.src = previewURL;
-            elements.timer.textContent = formatDuration(durationMS);
-            renderWaveform(peaks);
-            cleanupCapture();
-            setPhase('preview');
-        }, {once: true});
+        if (durationTimer !== null) {
+            clearTimeout(durationTimer);
+            durationTimer = null;
+        }
         recorder.stop();
     };
 
     const discardRecording = () => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
+        const recorder = mediaRecorder;
+        mediaRecorder = null;
+        stopping = true;
+        if (recorder && recorder.state === 'recording') {
+            try {
+                recorder.stop();
+            } catch (_) {
+                // The recorder has already been stopped by the browser.
+            }
         }
         cleanupCapture();
         elements.preview.pause();
@@ -305,6 +391,9 @@
         mediaRecorder = null;
         chunks = [];
         samples = [];
+        startedAt = 0;
+        stopRequestedAt = 0;
+        stopping = false;
         elements.timer.textContent = '0:00';
         renderWaveform([]);
         setPhase('ready');
@@ -355,6 +444,11 @@
     elements.discard.addEventListener('click', discardRecording);
     elements.send.addEventListener('click', sendRecording);
     elements.openApp.addEventListener('click', () => window.location.assign(returnURL));
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && mediaRecorder && mediaRecorder.state === 'recording') {
+            stopRecording();
+        }
+    });
     window.addEventListener('pagehide', cleanupCapture);
 
     renderWaveform([]);

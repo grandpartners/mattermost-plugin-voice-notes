@@ -95,21 +95,30 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := bearerToken(r.Header.Get("Authorization"))
-	_, tokens := p.runtime()
+	api, tokens := p.runtime()
 	claim, err := tokens.claim(token)
 	if errors.Is(err, errTokenInUse) {
 		writeJSONError(w, http.StatusConflict, "this recorder link is already sending a message")
 		return
 	}
-	if err != nil {
+	if errors.Is(err, errInvalidToken) {
 		writeJSONError(w, http.StatusUnauthorized, "this recorder link is invalid, expired, or already used")
+		return
+	}
+	if err != nil {
+		if api != nil {
+			api.LogWarn("Could not claim mobile voice recorder token", "error", err.Error())
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, "the voice recorder is temporarily unavailable")
 		return
 	}
 
 	completed := false
 	defer func() {
 		if !completed {
-			tokens.release(claim)
+			if releaseErr := tokens.release(claim); releaseErr != nil && api != nil {
+				api.LogWarn("Could not release mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "error", releaseErr.Error())
+			}
 		}
 	}()
 	target := claim.record.Target
@@ -121,7 +130,6 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	api, _ := p.runtime()
 	if api == nil || !hasRecorderPermissions(api, target.UserID, target.ChannelID) {
 		writeJSONError(w, http.StatusForbidden, "you no longer have permission to post files in this channel")
 		return
@@ -134,35 +142,58 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filename := fmt.Sprintf("voice-note-%d.%s", time.Now().UnixMilli(), payload.extension)
-	fileInfo, appErr := api.UploadFile(payload.audio, target.ChannelID, filename)
-	if appErr != nil || fileInfo == nil {
-		writeJSONError(w, http.StatusBadGateway, "Mattermost could not store the recording")
-		return
+	fileID := claim.record.FileID
+	if fileID == "" {
+		filename := fmt.Sprintf("voice-note-%d.%s", time.Now().UnixMilli(), payload.extension)
+		fileInfo, appErr := api.UploadFile(payload.audio, target.ChannelID, filename)
+		if appErr != nil || fileInfo == nil {
+			writeJSONError(w, http.StatusBadGateway, "Mattermost could not store the recording")
+			return
+		}
+		fileID = fileInfo.Id
+		if err = tokens.attachFile(claim, fileID); err != nil {
+			api.LogWarn(
+				"Could not save uploaded mobile voice note on its recorder token; Mattermost orphan-file cleanup may remove the file",
+				"file_id", fileID,
+				"pending_post_id", claim.record.PendingPostID,
+				"error", err.Error(),
+			)
+			writeJSONError(w, http.StatusServiceUnavailable, "the recording was stored but could not be prepared for sending; please try again")
+			return
+		}
 	}
 
 	post := &model.Post{
-		UserId:    target.UserID,
-		ChannelId: target.ChannelID,
-		RootId:    target.RootID,
-		Type:      "custom_voice",
-		Message:   localizedPostMessage(payload.language, payload.durationMS),
-		FileIds:   model.StringArray{fileInfo.Id},
+		UserId:        target.UserID,
+		ChannelId:     target.ChannelID,
+		RootId:        target.RootID,
+		Type:          "custom_voice",
+		Message:       localizedPostMessage(payload.language, payload.durationMS),
+		FileIds:       model.StringArray{fileID},
+		PendingPostId: claim.record.PendingPostID,
 		Props: model.StringInterface{
 			"voice_message": true,
-			"fileId":        fileInfo.Id,
+			"fileId":        fileID,
 			"duration":      payload.durationMS,
 			"peaks":         payload.peaks,
 		},
 	}
 	created, appErr := api.CreatePost(post)
 	if appErr != nil || created == nil {
+		api.LogWarn(
+			"Could not create a post for an uploaded mobile voice note; Mattermost orphan-file cleanup may remove the file",
+			"file_id", fileID,
+			"pending_post_id", claim.record.PendingPostID,
+			"error", fmt.Sprint(appErr),
+		)
 		writeJSONError(w, http.StatusBadGateway, "Mattermost could not create the voice message")
 		return
 	}
 
-	tokens.complete(claim)
 	completed = true
+	if err = tokens.complete(claim); err != nil {
+		api.LogWarn("Could not permanently redeem mobile voice recorder token", "pending_post_id", claim.record.PendingPostID, "post_id", created.Id, "error", err.Error())
+	}
 	returnURL := "mattermost://"
 	if siteURL, siteErr := configuredSiteURL(api.GetConfig()); siteErr == nil {
 		if parsed, parseErr := url.Parse(siteURL); parseErr == nil {

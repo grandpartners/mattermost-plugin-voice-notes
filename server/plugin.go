@@ -15,6 +15,7 @@ const pluginID = "corp.osbren.voicenotes"
 
 type mattermostAPI interface {
 	RegisterCommand(command *model.Command) error
+	LogWarn(msg string, keyValuePairs ...any)
 	GetConfig() *model.Config
 	GetUser(userID string) (*model.User, *model.AppError)
 	HasPermissionToChannel(userID, channelID string, permission *model.Permission) bool

@@ -28,9 +28,11 @@ type recorderTarget struct {
 }
 
 type tokenRecord struct {
-	Target    recorderTarget `json:"target"`
-	ExpiresAt time.Time      `json:"expires_at"`
-	InUse     bool           `json:"in_use"`
+	Target        recorderTarget `json:"target"`
+	ExpiresAt     time.Time      `json:"expires_at"`
+	PendingPostID string         `json:"pending_post_id"`
+	FileID        string         `json:"file_id,omitempty"`
+	InUse         bool           `json:"in_use"`
 }
 
 type tokenClaim struct {
@@ -69,7 +71,13 @@ func (s *tokenStore) issue(target recorderTarget) (string, error) {
 	}
 
 	token := base64.RawURLEncoding.EncodeToString(raw)
-	record := tokenRecord{Target: target, ExpiresAt: s.now().Add(recorderLinkTTL)}
+	now := s.now()
+	pendingDigest := sha256.Sum256(append([]byte("pending-post:"), raw...))
+	record := tokenRecord{
+		Target:        target,
+		ExpiresAt:     now.Add(recorderLinkTTL),
+		PendingPostID: hex.EncodeToString(pendingDigest[:13]) + ":" + fmt.Sprint(now.UnixMilli()),
+	}
 	value, err := json.Marshal(record)
 	if err != nil {
 		return "", err
@@ -106,6 +114,13 @@ func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 	if record.InUse {
 		return nil, errTokenInUse
 	}
+	// Tokens issued by an older plugin version do not have a pending post ID.
+	// Derive one from the stored token hash so retries remain stable after an
+	// upgrade without exposing the bearer token itself.
+	if record.PendingPostID == "" {
+		pendingDigest := sha256.Sum256([]byte(key))
+		record.PendingPostID = hex.EncodeToString(pendingDigest[:13]) + ":" + fmt.Sprint(record.ExpiresAt.Add(-recorderLinkTTL).UnixMilli())
+	}
 
 	record.InUse = true
 	claimedValue, err := json.Marshal(record)
@@ -123,25 +138,86 @@ func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 	return &tokenClaim{key: key, claimedValue: claimedValue, record: record}, nil
 }
 
-func (s *tokenStore) release(claim *tokenClaim) {
+// attachFile saves the uploaded file on the claimed token. If CreatePost
+// fails, release preserves this file ID and a retry can reuse the same upload.
+func (s *tokenStore) attachFile(claim *tokenClaim, fileID string) error {
+	if claim == nil || fileID == "" {
+		return fmt.Errorf("invalid recorder token file state")
+	}
+	if claim.record.FileID != "" {
+		if claim.record.FileID == fileID {
+			return nil
+		}
+		return fmt.Errorf("recorder token already has a different file")
+	}
+
+	record := claim.record
+	record.FileID = fileID
+	value, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encode recorder token file state: %w", err)
+	}
+	remaining := record.ExpiresAt.Sub(s.now())
+	if remaining <= 0 {
+		return errInvalidToken
+	}
+	swapped, err := s.backend.compareAndSet(claim.key, claim.claimedValue, value, remaining)
+	if err != nil {
+		return fmt.Errorf("save recorder token file state: %w", err)
+	}
+	if !swapped {
+		return fmt.Errorf("save recorder token file state: token state changed")
+	}
+
+	claim.claimedValue = value
+	claim.record = record
+	return nil
+}
+
+func (s *tokenStore) release(claim *tokenClaim) error {
 	if claim == nil {
-		return
+		return nil
 	}
 	record := claim.record
 	record.InUse = false
 	value, err := json.Marshal(record)
-	remaining := record.ExpiresAt.Sub(s.now())
-	if err == nil && remaining > 0 {
-		_, _ = s.backend.compareAndSet(claim.key, claim.claimedValue, value, remaining)
-	} else if remaining <= 0 {
-		_, _ = s.backend.compareAndDelete(claim.key, claim.claimedValue)
+	if err != nil {
+		return fmt.Errorf("encode released recorder token: %w", err)
 	}
+	remaining := record.ExpiresAt.Sub(s.now())
+	if remaining > 0 {
+		swapped, swapErr := s.backend.compareAndSet(claim.key, claim.claimedValue, value, remaining)
+		if swapErr != nil {
+			return fmt.Errorf("release recorder token: %w", swapErr)
+		}
+		if !swapped {
+			return fmt.Errorf("release recorder token: token state changed")
+		}
+		return nil
+	}
+
+	deleted, deleteErr := s.backend.compareAndDelete(claim.key, claim.claimedValue)
+	if deleteErr != nil {
+		return fmt.Errorf("delete expired recorder token: %w", deleteErr)
+	}
+	if !deleted {
+		return fmt.Errorf("delete expired recorder token: token state changed")
+	}
+	return nil
 }
 
-func (s *tokenStore) complete(claim *tokenClaim) {
-	if claim != nil {
-		_, _ = s.backend.compareAndDelete(claim.key, claim.claimedValue)
+func (s *tokenStore) complete(claim *tokenClaim) error {
+	if claim == nil {
+		return nil
 	}
+	deleted, err := s.backend.compareAndDelete(claim.key, claim.claimedValue)
+	if err != nil {
+		return fmt.Errorf("complete recorder token: %w", err)
+	}
+	if !deleted {
+		return fmt.Errorf("complete recorder token: token state changed")
+	}
+	return nil
 }
 
 func tokenKey(token string) string {
