@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <title>Voice Notes</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="shell">
+        <section class="card" aria-labelledby="title">
+            <header class="header">
+                <div class="logo" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+                </div>
+                <div>
+                    <h1 id="title">Voice Notes</h1>
+                    <p id="subtitle" data-i18n="subtitle">Record a voice message for Mattermost</p>
+                </div>
+            </header>
+
+            <div id="status" class="status" role="status" aria-live="polite">
+                <span id="record-dot" class="record-dot" hidden></span>
+                <span id="status-text" data-i18n="ready">Ready to record</span>
+            </div>
+
+            <div id="timer" class="timer">0:00</div>
+            <div id="waveform" class="waveform" aria-hidden="true"></div>
+
+            <audio id="preview" class="preview" controls hidden></audio>
+
+            <p id="error" class="error" role="alert" hidden></p>
+
+            <div id="ready-actions" class="actions">
+                <button id="record" class="button button-primary" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z"/></svg>
+                    <span data-i18n="record">Record</span>
+                </button>
+            </div>
+
+            <div id="recording-actions" class="actions" hidden>
+                <button id="cancel" class="button button-quiet" type="button" data-i18n="discard">Discard</button>
+                <button id="stop" class="button button-stop" type="button">
+                    <span class="stop-icon" aria-hidden="true"></span>
+                    <span data-i18n="stop">Stop</span>
+                </button>
+            </div>
+
+            <div id="preview-actions" class="actions" hidden>
+                <button id="discard" class="button button-quiet" type="button" data-i18n="discard">Discard</button>
+                <button id="send" class="button button-primary" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.4 20.4 18-7.7a.75.75 0 0 0 0-1.4l-18-7.7a.75.75 0 0 0-1.02.87L4.2 11H13a1 1 0 1 1 0 2H4.2l-1.82 6.53a.75.75 0 0 0 1.02.87Z"/></svg>
+                    <span data-i18n="send">Send</span>
+                </button>
+            </div>
+
+            <div id="sent-actions" class="sent" hidden>
+                <div class="success-mark" aria-hidden="true">✓</div>
+                <p data-i18n="sent">Voice message sent</p>
+                <button id="open-app" class="button button-primary" type="button" data-i18n="return">Return to Mattermost</button>
+            </div>
+
+            <p class="hint" data-i18n="hint">Maximum length: 5 minutes. This private link can be used once.</p>
+        </section>
+    </main>
+    <script src="lamejs.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
