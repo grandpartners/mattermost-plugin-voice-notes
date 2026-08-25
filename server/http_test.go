@@ -123,6 +123,9 @@ func TestServeMobileRecorderUsesMP3Encoder(t *testing.T) {
 	if strings.Contains(app, "MediaRecorder") || strings.Contains(app, "audio/webm") {
 		t.Fatal("mobile recorder still contains a container-dependent recording fallback")
 	}
+	if !strings.Contains(app, mobileTokenHeader) || strings.Contains(app, "Authorization") {
+		t.Fatal("mobile recorder does not use its plugin-specific capability header")
+	}
 
 	encoderRecorder := httptest.NewRecorder()
 	p.ServeHTTP(nil, encoderRecorder, httptest.NewRequest(http.MethodGet, "/mobile/lamejs.js", nil))
@@ -189,6 +192,30 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 	p.ServeHTTP(nil, replayRecorder, replay)
 	if replayRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("replay status = %d, want %d", replayRecorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestMobileSendSurvivesMattermostAuthorizationSanitization(t *testing.T) {
+	api := &fakeMattermostAPI{}
+	store := newTokenStore(nil)
+	p := &Plugin{api: api, tokens: store}
+	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	request := newMP3UploadRequest(t, token)
+	request.Header.Set("Authorization", "Bearer mattermost-session-token")
+	// Mattermost owns Authorization and may remove it before Plugin.ServeHTTP.
+	request.Header.Del("Authorization")
+	if request.Header.Get(mobileTokenHeader) != token {
+		t.Fatal("Mattermost header sanitization removed the recorder capability")
+	}
+
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
 	}
 }
 
@@ -426,6 +453,6 @@ func newMP3UploadRequestWith(t *testing.T, token string, audio []byte, duration 
 
 	request := httptest.NewRequest(http.MethodPost, "/mobile/send", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set(mobileTokenHeader, token)
 	return request
 }

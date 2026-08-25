@@ -385,7 +385,7 @@
         try {
             const response = await fetch('send', {
                 method: 'POST',
-                headers: {Authorization: `Bearer ${token}`},
+                headers: {'X-Voice-Recorder-Token': token},
                 body: form,
                 credentials: 'omit',
             });

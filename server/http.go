@@ -22,6 +22,7 @@ import (
 const (
 	maxMobileUploadBytes = 32 << 20
 	maxRecordingMS       = 300_000
+	mobileTokenHeader    = "X-Voice-Recorder-Token"
 )
 
 //go:embed mobile/index.html mobile/app.js mobile/lamejs.js mobile/styles.css
@@ -98,7 +99,15 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := bearerToken(r.Header.Get("Authorization"))
+	// Authorization is reserved for Mattermost sessions and has been removed
+	// before plugin handlers in some server versions. Keep the recorder
+	// capability in a plugin-specific header so it reaches ServeHTTP unchanged.
+	token := strings.TrimSpace(r.Header.Get(mobileTokenHeader))
+	if token == "" {
+		// Allow recorder pages opened immediately before a plugin upgrade to
+		// finish sending during the token's short lifetime.
+		token = bearerToken(r.Header.Get("Authorization"))
+	}
 	api, tokens := p.runtime()
 	claim, err := tokens.claim(token)
 	if errors.Is(err, errTokenInUse) {
