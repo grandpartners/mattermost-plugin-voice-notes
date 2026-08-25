@@ -1,8 +1,11 @@
 (() => {
     'use strict';
 
+    const Mp3Encoder = window.lamejs && window.lamejs.Mp3Encoder;
     const MAX_DURATION_MS = 300000;
     const BAR_COUNT = 48;
+    const CHUNK_SIZE = 4096;
+    const BIT_RATE_KBPS = 64;
     const messages = {
         en: {
             subtitle: 'Record a voice message for Mattermost', ready: 'Ready to record', recording: 'Recording…',
@@ -14,6 +17,8 @@
             denied: 'Microphone access is blocked. Allow it in your browser or system settings.',
             failed: 'Could not start recording.', interrupted: 'Recording was interrupted. Please try again.',
             tooLong: 'The recording exceeded 5 minutes and was discarded.', sendFailed: 'The voice message could not be sent.',
+            retryOriginal: 'The recording was uploaded, but the message was not created. Retry the same recording.',
+            retryMismatch: 'This link is tied to an earlier recording. Run /voice again to record a new message.',
         },
         ru: {
             subtitle: 'Запишите голосовое сообщение для Mattermost', ready: 'Готово к записи', recording: 'Идёт запись…',
@@ -25,6 +30,8 @@
             denied: 'Доступ к микрофону заблокирован. Разрешите его в настройках браузера или системы.',
             failed: 'Не удалось начать запись.', interrupted: 'Запись была прервана. Попробуйте ещё раз.',
             tooLong: 'Запись превысила 5 минут и была удалена.', sendFailed: 'Не удалось отправить голосовое сообщение.',
+            retryOriginal: 'Запись загружена, но сообщение не создано. Повторите отправку этой же записи.',
+            retryMismatch: 'Ссылка привязана к предыдущей записи. Выполните /voice ещё раз для нового сообщения.',
         },
         es: {
             subtitle: 'Graba un mensaje de voz para Mattermost', ready: 'Listo para grabar', recording: 'Grabando…',
@@ -36,6 +43,8 @@
             denied: 'El micrófono está bloqueado. Permítelo en los ajustes del navegador o del sistema.',
             failed: 'No se pudo empezar a grabar.', interrupted: 'La grabación se interrumpió. Inténtalo de nuevo.',
             tooLong: 'La grabación superó los 5 minutos y se descartó.', sendFailed: 'No se pudo enviar el mensaje de voz.',
+            retryOriginal: 'La grabación se subió, pero el mensaje no se creó. Reintenta con la misma grabación.',
+            retryMismatch: 'Este enlace está vinculado a una grabación anterior. Ejecuta /voice de nuevo.',
         },
     };
 
@@ -72,20 +81,22 @@
         bars.push(bar);
     }
 
-    let mediaRecorder = null;
     let stream = null;
     let audioContext = null;
-    let analyser = null;
-    let animationFrame = null;
+    let sourceNode = null;
+    let processor = null;
+    let sink = null;
+    let encoder = null;
     let durationTimer = null;
-    let startedAt = 0;
-    let stopRequestedAt = 0;
     let chunks = [];
     let samples = [];
+    let sampleCount = 0;
     let recordingResult = null;
     let previewURL = '';
     let returnURL = 'mattermost://';
+    let recording = false;
     let stopping = false;
+    let retryLocked = false;
 
     const formatDuration = (milliseconds) => {
         const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -117,6 +128,15 @@
         return output.map((value) => Math.round((value / maximum) * 100) / 100);
     };
 
+    const toInt16 = (float32) => {
+        const output = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+            const sample = Math.max(-1, Math.min(1, float32[i]));
+            output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        }
+        return output;
+    };
+
     const setPhase = (phase) => {
         elements.readyActions.hidden = phase !== 'ready';
         elements.recordingActions.hidden = phase !== 'recording';
@@ -130,7 +150,7 @@
         elements.waveform.classList.toggle('recording', phase === 'recording');
         elements.statusText.textContent = t[phase] || t.ready;
         elements.send.disabled = phase === 'sending';
-        elements.discard.disabled = phase === 'sending';
+        elements.discard.disabled = phase === 'sending' || retryLocked;
         elements.error.hidden = true;
     };
 
@@ -140,13 +160,22 @@
     };
 
     const cleanupCapture = () => {
-        if (animationFrame) {
-            cancelAnimationFrame(animationFrame);
-            animationFrame = null;
-        }
         if (durationTimer !== null) {
             clearTimeout(durationTimer);
             durationTimer = null;
+        }
+        if (processor) {
+            processor.onaudioprocess = null;
+            processor.disconnect();
+            processor = null;
+        }
+        if (sourceNode) {
+            sourceNode.disconnect();
+            sourceNode = null;
+        }
+        if (sink) {
+            sink.disconnect();
+            sink = null;
         }
         if (stream) {
             stream.getTracks().forEach((track) => track.stop());
@@ -156,26 +185,16 @@
             audioContext.close().catch(() => {});
         }
         audioContext = null;
-        analyser = null;
     };
 
-    const failCapture = (message, recorder = mediaRecorder) => {
-        if (recorder && recorder === mediaRecorder) {
-            mediaRecorder = null;
-            if (recorder.state === 'recording') {
-                try {
-                    recorder.stop();
-                } catch (_) {
-                    // The recorder has already been stopped by the browser.
-                }
-            }
-        }
+    const failCapture = (message) => {
+        recording = false;
         cleanupCapture();
+        encoder = null;
         recordingResult = null;
         chunks = [];
         samples = [];
-        startedAt = 0;
-        stopRequestedAt = 0;
+        sampleCount = 0;
         stopping = false;
         elements.timer.textContent = '0:00';
         renderWaveform([]);
@@ -183,24 +202,32 @@
         showError(message);
     };
 
-    const finalizeRecording = (recorder) => {
-        if (recorder !== mediaRecorder) {
+    const finalizeRecording = () => {
+        if (!recording || !encoder || !audioContext) {
             return;
         }
-        const durationMS = Math.max(1, Math.round((stopRequestedAt || performance.now()) - startedAt));
+        const durationMS = Math.max(1, Math.round((sampleCount / audioContext.sampleRate) * 1000));
         if (durationMS > MAX_DURATION_MS + 1000) {
-            failCapture(t.tooLong, recorder);
+            failCapture(t.tooLong);
             return;
         }
 
-        const mimeType = normalizedMimeType(recorder.mimeType);
-        const blob = new Blob(chunks, {type: mimeType});
-        if (!mimeType || !blob.size) {
-            failCapture(t.interrupted, recorder);
+        try {
+            const finalChunk = encoder.flush();
+            if (finalChunk.length) {
+                chunks.push(finalChunk);
+            }
+        } catch (_) {
+            failCapture(t.interrupted);
+            return;
+        }
+        const blob = new Blob(chunks, {type: 'audio/mpeg'});
+        if (!blob.size) {
+            failCapture(t.interrupted);
             return;
         }
         const peaks = downsample(samples);
-        recordingResult = {blob, durationMS, peaks, mimeType};
+        recordingResult = {blob, durationMS, peaks};
         if (previewURL) {
             URL.revokeObjectURL(previewURL);
         }
@@ -208,59 +235,41 @@
         elements.preview.src = previewURL;
         elements.timer.textContent = formatDuration(durationMS);
         renderWaveform(peaks);
-        mediaRecorder = null;
+        recording = false;
         cleanupCapture();
+        encoder = null;
         stopping = false;
         setPhase('preview');
     };
 
-    const chooseMimeType = () => {
-        const candidates = [
-            'audio/mp4;codecs=mp4a.40.2',
-            'audio/mp4',
-            'audio/webm;codecs=opus',
-            'audio/webm',
-        ];
-        if (typeof MediaRecorder.isTypeSupported !== 'function') {
-            return '';
-        }
-        return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || '';
-    };
-
-    const normalizedMimeType = (raw) => {
-        const value = (raw || '').toLowerCase();
-        if (value.includes('mp4') || value.includes('m4a')) {
-            return 'audio/mp4';
-        }
-        if (value.includes('webm')) {
-            return 'audio/webm';
-        }
-        return '';
-    };
-
-    const updateMeter = () => {
-        if (!mediaRecorder || mediaRecorder.state !== 'recording') {
+    const ingestAudio = (float32) => {
+        if (!recording || stopping || !float32 || !float32.length) {
             return;
         }
-        let peak = 0.035;
-        if (analyser) {
-            const data = new Uint8Array(analyser.fftSize);
-            analyser.getByteTimeDomainData(data);
-            data.forEach((value) => {
-                peak = Math.max(peak, Math.abs(value - 128) / 128);
-            });
+        let peak = 0;
+        for (let i = 0; i < float32.length; i++) {
+            peak = Math.max(peak, Math.abs(float32[i]));
         }
         samples.push(peak);
+
+        try {
+            const encoded = encoder.encodeBuffer(toInt16(float32));
+            if (encoded.length) {
+                chunks.push(encoded);
+            }
+        } catch (_) {
+            failCapture(t.interrupted);
+            return;
+        }
+        sampleCount += float32.length;
         const tail = samples.slice(-BAR_COUNT);
         renderWaveform(new Array(BAR_COUNT - tail.length).fill(0.035).concat(tail));
 
-        const elapsed = performance.now() - startedAt;
+        const elapsed = (sampleCount / audioContext.sampleRate) * 1000;
         elements.timer.textContent = formatDuration(elapsed);
         if (elapsed >= MAX_DURATION_MS) {
             stopRecording();
-            return;
         }
-        animationFrame = requestAnimationFrame(updateMeter);
     };
 
     const startRecording = async () => {
@@ -268,7 +277,8 @@
             showError(t.noToken);
             return;
         }
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !AudioContextClass || !Mp3Encoder) {
             showError(t.unsupported);
             return;
         }
@@ -278,108 +288,71 @@
             stream = await navigator.mediaDevices.getUserMedia({
                 audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true},
             });
-            const mimeType = chooseMimeType();
-            mediaRecorder = mimeType ? new MediaRecorder(stream, {mimeType, audioBitsPerSecond: 64000}) : new MediaRecorder(stream);
-            if (!normalizedMimeType(mediaRecorder.mimeType)) {
-                throw new Error('unsupported-mime');
-            }
-
-            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-            if (AudioContextClass) {
-                try {
-                    audioContext = new AudioContextClass();
-                    analyser = audioContext.createAnalyser();
-                    analyser.fftSize = 256;
-                    audioContext.createMediaStreamSource(stream).connect(analyser);
-                    await audioContext.resume();
-                } catch (_) {
-                    if (audioContext && audioContext.state !== 'closed') {
-                        audioContext.close().catch(() => {});
-                    }
-                    audioContext = null;
-                    analyser = null;
-                }
-            }
+            audioContext = new AudioContextClass();
+            await audioContext.resume();
+            encoder = new Mp3Encoder(1, audioContext.sampleRate, BIT_RATE_KBPS);
+            sourceNode = audioContext.createMediaStreamSource(stream);
+            processor = audioContext.createScriptProcessor(CHUNK_SIZE, 1, 1);
+            sink = audioContext.createGain();
+            sink.gain.value = 0;
 
             chunks = [];
             samples = [];
+            sampleCount = 0;
+            recording = true;
             stopping = false;
-            stopRequestedAt = 0;
+            retryLocked = false;
             elements.stop.disabled = false;
             elements.cancel.disabled = false;
-            const recorder = mediaRecorder;
-            recorder.addEventListener('dataavailable', (event) => {
-                if (event.data && event.data.size) {
-                    chunks.push(event.data);
-                }
-            });
-            recorder.addEventListener('error', () => {
-                if (recorder === mediaRecorder) {
-                    failCapture(t.interrupted, recorder);
-                }
-            }, {once: true});
-            recorder.addEventListener('stop', () => {
-                if (recorder !== mediaRecorder) {
-                    return;
-                }
-                if (!stopping) {
-                    failCapture(t.interrupted, recorder);
-                    return;
-                }
-                finalizeRecording(recorder);
-            }, {once: true});
+            processor.onaudioprocess = (event) => ingestAudio(event.inputBuffer.getChannelData(0));
             stream.getAudioTracks().forEach((track) => {
                 track.addEventListener('ended', () => {
-                    if (recorder === mediaRecorder && !stopping) {
-                        failCapture(t.interrupted, recorder);
+                    if (recording && !stopping) {
+                        failCapture(t.interrupted);
                     }
                 }, {once: true});
             });
-            recorder.start(250);
-            startedAt = performance.now();
+            sourceNode.connect(processor);
+            processor.connect(sink);
+            sink.connect(audioContext.destination);
             durationTimer = window.setTimeout(stopRecording, MAX_DURATION_MS);
             elements.timer.textContent = '0:00';
             renderWaveform([]);
             setPhase('recording');
-            animationFrame = requestAnimationFrame(updateMeter);
         } catch (error) {
-            mediaRecorder = null;
+            recording = false;
             cleanupCapture();
+            encoder = null;
             const denied = error && (error.name === 'NotAllowedError' || error.name === 'SecurityError');
-            showError(denied ? t.denied : (error && error.message === 'unsupported-mime' ? t.unsupported : t.failed));
+            showError(denied ? t.denied : t.failed);
         } finally {
             elements.record.disabled = false;
         }
     };
 
     const stopRecording = () => {
-        if (!mediaRecorder || mediaRecorder.state !== 'recording' || stopping) {
+        if (!recording || stopping) {
             return;
         }
         stopping = true;
-        stopRequestedAt = performance.now();
         elements.stop.disabled = true;
         elements.cancel.disabled = true;
-        const recorder = mediaRecorder;
         if (durationTimer !== null) {
             clearTimeout(durationTimer);
             durationTimer = null;
         }
-        recorder.stop();
+        finalizeRecording();
     };
 
     const discardRecording = () => {
-        const recorder = mediaRecorder;
-        mediaRecorder = null;
-        stopping = true;
-        if (recorder && recorder.state === 'recording') {
-            try {
-                recorder.stop();
-            } catch (_) {
-                // The recorder has already been stopped by the browser.
-            }
+        if (retryLocked) {
+            showError(t.retryOriginal);
+            return;
         }
+        recording = false;
+        stopping = true;
         cleanupCapture();
+        encoder = null;
         elements.preview.pause();
         elements.preview.removeAttribute('src');
         elements.preview.load();
@@ -388,11 +361,9 @@
             previewURL = '';
         }
         recordingResult = null;
-        mediaRecorder = null;
         chunks = [];
         samples = [];
-        startedAt = 0;
-        stopRequestedAt = 0;
+        sampleCount = 0;
         stopping = false;
         elements.timer.textContent = '0:00';
         renderWaveform([]);
@@ -405,9 +376,8 @@
             return;
         }
         setPhase('sending');
-        const extension = recordingResult.mimeType === 'audio/mp4' ? 'm4a' : 'webm';
         const form = new FormData();
-        form.append('audio', recordingResult.blob, `voice-note.${extension}`);
+        form.append('audio', recordingResult.blob, 'voice-note.mp3');
         form.append('duration_ms', String(recordingResult.durationMS));
         form.append('peaks', JSON.stringify(recordingResult.peaks));
         form.append('language', language);
@@ -426,6 +396,14 @@
                 // Use the localized fallback below.
             }
             if (!response.ok) {
+                if (payload.retry_original) {
+                    retryLocked = true;
+                    throw new Error(t.retryOriginal);
+                }
+                if (payload.retry_mismatch) {
+                    token = '';
+                    throw new Error(t.retryMismatch);
+                }
                 throw new Error(response.status === 401 ? t.noToken : t.sendFailed);
             }
             token = '';
@@ -445,7 +423,7 @@
     elements.send.addEventListener('click', sendRecording);
     elements.openApp.addEventListener('click', () => window.location.assign(returnURL));
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden && mediaRecorder && mediaRecorder.state === 'recording') {
+        if (document.hidden && recording) {
             stopRecording();
         }
     });

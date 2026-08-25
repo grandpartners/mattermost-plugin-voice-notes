@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -64,7 +65,7 @@ func (f *fakeMattermostAPI) HasPermissionToChannel(_, _ string, _ *model.Permiss
 func (f *fakeMattermostAPI) GetPost(_ string) (*model.Post, *model.AppError) { return nil, nil }
 func (f *fakeMattermostAPI) UploadFile(data []byte, channelID, filename string) (*model.FileInfo, *model.AppError) {
 	f.uploadCalls++
-	if f.failUpload || len(data) == 0 || channelID == "" || !strings.HasSuffix(filename, ".webm") {
+	if f.failUpload || len(data) == 0 || channelID == "" || !strings.HasSuffix(filename, ".mp3") {
 		return nil, model.NewAppError("test", "invalid upload", nil, "", http.StatusBadRequest)
 	}
 	return &model.FileInfo{Id: "abcdefghijklmnopqrstuvwxyz"}, nil
@@ -107,15 +108,38 @@ func TestServeMobileRecorder(t *testing.T) {
 	}
 }
 
-func TestAudioContainerSignatures(t *testing.T) {
-	if !hasAudioContainerSignature([]byte{0x1a, 0x45, 0xdf, 0xa3}, "webm") {
-		t.Fatal("valid WebM signature rejected")
+func TestServeMobileRecorderUsesMP3Encoder(t *testing.T) {
+	p := &Plugin{}
+
+	appRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, appRecorder, httptest.NewRequest(http.MethodGet, "/mobile/app.js", nil))
+	if appRecorder.Code != http.StatusOK {
+		t.Fatalf("app.js status = %d, want %d", appRecorder.Code, http.StatusOK)
 	}
-	if !hasAudioContainerSignature([]byte{0, 0, 0, 20, 'f', 't', 'y', 'p', 'M', '4', 'A', ' '}, "m4a") {
-		t.Fatal("valid M4A signature rejected")
+	app := appRecorder.Body.String()
+	if !strings.Contains(app, "voice-note.mp3") || !strings.Contains(app, "audio/mpeg") {
+		t.Fatal("mobile recorder does not create an MP3 upload")
 	}
-	if hasAudioContainerSignature([]byte("not audio"), "webm") {
-		t.Fatal("invalid WebM signature accepted")
+	if strings.Contains(app, "MediaRecorder") || strings.Contains(app, "audio/webm") {
+		t.Fatal("mobile recorder still contains a container-dependent recording fallback")
+	}
+
+	encoderRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, encoderRecorder, httptest.NewRequest(http.MethodGet, "/mobile/lamejs.js", nil))
+	if encoderRecorder.Code != http.StatusOK || !strings.Contains(encoderRecorder.Body.String(), "Mp3Encoder") {
+		t.Fatal("mobile MP3 encoder was not served")
+	}
+}
+
+func TestMP3Signatures(t *testing.T) {
+	if !hasMP3Signature([]byte{0xff, 0xfb, 0x90}) {
+		t.Fatal("valid MP3 frame signature rejected")
+	}
+	if !hasMP3Signature([]byte("ID3")) {
+		t.Fatal("valid ID3 signature rejected")
+	}
+	if hasMP3Signature([]byte("not audio")) {
+		t.Fatal("invalid MP3 signature accepted")
 	}
 }
 
@@ -141,7 +165,7 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 		t.Fatalf("issue token: %v", err)
 	}
 
-	request := newWebMUploadRequest(t, token)
+	request := newMP3UploadRequest(t, token)
 	recorder := httptest.NewRecorder()
 	p.ServeHTTP(nil, recorder, request)
 	if recorder.Code != http.StatusCreated {
@@ -160,7 +184,7 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 		t.Fatal("voice post has no pending post ID for retry deduplication")
 	}
 
-	replay := newWebMUploadRequest(t, token)
+	replay := newMP3UploadRequest(t, token)
 	replayRecorder := httptest.NewRecorder()
 	p.ServeHTTP(nil, replayRecorder, replay)
 	if replayRecorder.Code != http.StatusUnauthorized {
@@ -178,7 +202,7 @@ func TestMobileSendReusesUploadAfterCreatePostFailure(t *testing.T) {
 	}
 
 	firstRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, firstRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, firstRecorder, newMP3UploadRequest(t, token))
 	if firstRecorder.Code != http.StatusBadGateway {
 		t.Fatalf("first status = %d, want %d; body: %s", firstRecorder.Code, http.StatusBadGateway, firstRecorder.Body.String())
 	}
@@ -188,7 +212,7 @@ func TestMobileSendReusesUploadAfterCreatePostFailure(t *testing.T) {
 
 	api.failCreate = false
 	secondRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, secondRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, secondRecorder, newMP3UploadRequest(t, token))
 	if secondRecorder.Code != http.StatusCreated {
 		t.Fatalf("retry status = %d, want %d; body: %s", secondRecorder.Code, http.StatusCreated, secondRecorder.Body.String())
 	}
@@ -206,6 +230,53 @@ func TestMobileSendReusesUploadAfterCreatePostFailure(t *testing.T) {
 	}
 }
 
+func TestMobileSendRejectsDifferentRecordingAfterCreatePostFailure(t *testing.T) {
+	api := &fakeMattermostAPI{failCreate: true}
+	store := newTokenStore(nil)
+	p := &Plugin{api: api, tokens: store}
+	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	originalAudio := []byte{0xff, 0xfb, 0x90, 0x01}
+	firstRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, firstRecorder, newMP3UploadRequestWith(t, token, originalAudio, "4200", []float64{0.1, 0.2, 0.3, 0.4, 0.5}, "ru"))
+	if firstRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("first status = %d, want %d; body: %s", firstRecorder.Code, http.StatusBadGateway, firstRecorder.Body.String())
+	}
+	var failure map[string]any
+	if err = json.Unmarshal(firstRecorder.Body.Bytes(), &failure); err != nil || failure["retry_original"] != true {
+		t.Fatalf("first failure did not lock the original recording: %s", firstRecorder.Body.String())
+	}
+
+	api.failCreate = false
+	mismatchRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, mismatchRecorder, newMP3UploadRequestWith(t, token, []byte{0xff, 0xfb, 0x90, 0x02}, "9000", []float64{0.9, 0.8, 0.7, 0.6, 0.5}, "en"))
+	if mismatchRecorder.Code != http.StatusConflict {
+		t.Fatalf("mismatch status = %d, want %d; body: %s", mismatchRecorder.Code, http.StatusConflict, mismatchRecorder.Body.String())
+	}
+	if api.uploadCalls != 1 || api.createCalls != 1 {
+		t.Fatalf("mismatched retry caused side effects: upload = %d, create = %d", api.uploadCalls, api.createCalls)
+	}
+
+	retryRecorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequestWith(t, token, originalAudio, "9000", []float64{0.9, 0.8, 0.7, 0.6, 0.5}, "en"))
+	if retryRecorder.Code != http.StatusCreated {
+		t.Fatalf("original retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
+	}
+	if api.created == nil || api.created.Message != "🎤 Голосовое сообщение (0:04)" {
+		t.Fatalf("retry did not preserve original metadata: %#v", api.created)
+	}
+	if got := api.created.GetProps()["duration"]; got != int64(4200) {
+		t.Fatalf("retry duration = %#v, want original duration 4200", got)
+	}
+	wantPeaks := []float64{0.1, 0.2, 0.3, 0.4, 0.5}
+	if got := api.created.GetProps()["peaks"]; !reflect.DeepEqual(got, wantPeaks) {
+		t.Fatalf("retry waveform = %#v, want original waveform %#v", got, wantPeaks)
+	}
+}
+
 func TestMobileSendReleasesTokenAfterUploadFailure(t *testing.T) {
 	api := &fakeMattermostAPI{failUpload: true}
 	store := newTokenStore(nil)
@@ -216,14 +287,14 @@ func TestMobileSendReleasesTokenAfterUploadFailure(t *testing.T) {
 	}
 
 	firstRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, firstRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, firstRecorder, newMP3UploadRequest(t, token))
 	if firstRecorder.Code != http.StatusBadGateway {
 		t.Fatalf("first status = %d, want %d", firstRecorder.Code, http.StatusBadGateway)
 	}
 
 	api.failUpload = false
 	retryRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, retryRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequest(t, token))
 	if retryRecorder.Code != http.StatusCreated {
 		t.Fatalf("retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
 	}
@@ -239,7 +310,7 @@ func TestMobileSendRechecksPermissionsAndReleasesToken(t *testing.T) {
 	}
 
 	deniedRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, deniedRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, deniedRecorder, newMP3UploadRequest(t, token))
 	if deniedRecorder.Code != http.StatusForbidden {
 		t.Fatalf("denied status = %d, want %d", deniedRecorder.Code, http.StatusForbidden)
 	}
@@ -249,7 +320,7 @@ func TestMobileSendRechecksPermissionsAndReleasesToken(t *testing.T) {
 
 	api.denyPermissions = false
 	retryRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, retryRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequest(t, token))
 	if retryRecorder.Code != http.StatusCreated {
 		t.Fatalf("retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
 	}
@@ -265,7 +336,7 @@ func TestMobileSendRejectsDeactivatedUserAndReleasesToken(t *testing.T) {
 	}
 
 	deactivatedRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, deactivatedRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, deactivatedRecorder, newMP3UploadRequest(t, token))
 	if deactivatedRecorder.Code != http.StatusForbidden {
 		t.Fatalf("deactivated status = %d, want %d; body: %s", deactivatedRecorder.Code, http.StatusForbidden, deactivatedRecorder.Body.String())
 	}
@@ -278,7 +349,7 @@ func TestMobileSendRejectsDeactivatedUserAndReleasesToken(t *testing.T) {
 
 	api.userDeleteAt = 0
 	retryRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, retryRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, retryRecorder, newMP3UploadRequest(t, token))
 	if retryRecorder.Code != http.StatusCreated {
 		t.Fatalf("retry status = %d, want %d; body: %s", retryRecorder.Code, http.StatusCreated, retryRecorder.Body.String())
 	}
@@ -297,7 +368,7 @@ func TestMobileSendAllowsOnlyOneParallelRequest(t *testing.T) {
 		t.Fatalf("issue token: %v", err)
 	}
 
-	firstRequest := newWebMUploadRequest(t, token)
+	firstRequest := newMP3UploadRequest(t, token)
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		recorder := httptest.NewRecorder()
@@ -312,7 +383,7 @@ func TestMobileSendAllowsOnlyOneParallelRequest(t *testing.T) {
 	}
 
 	parallelRecorder := httptest.NewRecorder()
-	p.ServeHTTP(nil, parallelRecorder, newWebMUploadRequest(t, token))
+	p.ServeHTTP(nil, parallelRecorder, newMP3UploadRequest(t, token))
 	if parallelRecorder.Code != http.StatusConflict {
 		t.Fatalf("parallel status = %d, want %d", parallelRecorder.Code, http.StatusConflict)
 	}
@@ -328,22 +399,27 @@ func TestMobileSendAllowsOnlyOneParallelRequest(t *testing.T) {
 	}
 }
 
-func newWebMUploadRequest(t *testing.T, token string) *http.Request {
+func newMP3UploadRequest(t *testing.T, token string) *http.Request {
+	t.Helper()
+	return newMP3UploadRequestWith(t, token, []byte{0xff, 0xfb, 0x90, 0x01, 0x02}, "4200", []float64{0.1, 0.2, 0.3, 0.4, 0.5}, "ru")
+}
+
+func newMP3UploadRequestWith(t *testing.T, token string, audio []byte, duration string, waveform []float64, language string) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", `form-data; name="audio"; filename="voice-note.webm"`)
-	header.Set("Content-Type", "audio/webm; codecs=opus")
+	header.Set("Content-Disposition", `form-data; name="audio"; filename="voice-note.mp3"`)
+	header.Set("Content-Type", "audio/mpeg")
 	file, err := writer.CreatePart(header)
 	if err != nil {
 		t.Fatalf("create audio part: %v", err)
 	}
-	_, _ = file.Write([]byte{0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x02})
-	_ = writer.WriteField("duration_ms", "4200")
-	peaks, _ := json.Marshal([]float64{0.1, 0.2, 0.3, 0.4, 0.5})
+	_, _ = file.Write(audio)
+	_ = writer.WriteField("duration_ms", duration)
+	peaks, _ := json.Marshal(waveform)
 	_ = writer.WriteField("peaks", string(peaks))
-	_ = writer.WriteField("language", "ru")
+	_ = writer.WriteField("language", language)
 	if err = writer.Close(); err != nil {
 		t.Fatalf("close multipart writer: %v", err)
 	}

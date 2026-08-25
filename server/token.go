@@ -32,6 +32,10 @@ type tokenRecord struct {
 	ExpiresAt     time.Time      `json:"expires_at"`
 	PendingPostID string         `json:"pending_post_id"`
 	FileID        string         `json:"file_id,omitempty"`
+	AudioSHA256   string         `json:"audio_sha256,omitempty"`
+	DurationMS    int64          `json:"duration_ms,omitempty"`
+	Peaks         []float64      `json:"peaks,omitempty"`
+	Language      string         `json:"language,omitempty"`
 	InUse         bool           `json:"in_use"`
 }
 
@@ -139,10 +143,11 @@ func (s *tokenStore) claim(token string) (*tokenClaim, error) {
 	return &tokenClaim{key: key, claimedValue: claimedValue, record: record}, nil
 }
 
-// attachFile saves the uploaded file on the claimed token. If CreatePost
-// fails, release preserves this file ID and a retry can reuse the same upload.
-func (s *tokenStore) attachFile(claim *tokenClaim, fileID string) error {
-	if claim == nil || fileID == "" {
+// attachFile saves the uploaded file and its immutable post metadata on the
+// claimed token. If CreatePost fails, a retry can only reuse this exact audio
+// and the post is rebuilt from the original metadata.
+func (s *tokenStore) attachFile(claim *tokenClaim, fileID, audioSHA256 string, durationMS int64, peaks []float64, language string) error {
+	if claim == nil || fileID == "" || audioSHA256 == "" || durationMS <= 0 || len(peaks) == 0 {
 		return fmt.Errorf("invalid recorder token file state")
 	}
 	if claim.record.FileID != "" {
@@ -154,6 +159,10 @@ func (s *tokenStore) attachFile(claim *tokenClaim, fileID string) error {
 
 	record := claim.record
 	record.FileID = fileID
+	record.AudioSHA256 = audioSHA256
+	record.DurationMS = durationMS
+	record.Peaks = append([]float64(nil), peaks...)
+	record.Language = language
 	value, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("encode recorder token file state: %w", err)

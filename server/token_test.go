@@ -48,7 +48,7 @@ func TestTokenStoreOneTimeLifecycle(t *testing.T) {
 	if claim.record.PendingPostID == "" {
 		t.Fatal("issued token has no pending post ID")
 	}
-	if err = store.attachFile(claim, "file-id"); err != nil {
+	if err = store.attachFile(claim, "file-id", "audio-sha256", 4200, []float64{0.1, 0.2}, "ru"); err != nil {
 		t.Fatalf("attach file: %v", err)
 	}
 	if err = store.release(claim); err != nil {
@@ -60,6 +60,9 @@ func TestTokenStoreOneTimeLifecycle(t *testing.T) {
 	}
 	if claim.record.FileID != "file-id" {
 		t.Fatalf("file ID after retry = %q, want %q", claim.record.FileID, "file-id")
+	}
+	if claim.record.AudioSHA256 != "audio-sha256" || claim.record.DurationMS != 4200 || claim.record.Language != "ru" {
+		t.Fatalf("voice metadata was not preserved after retry: %#v", claim.record)
 	}
 	if err = store.complete(claim); err != nil {
 		t.Fatalf("complete token: %v", err)

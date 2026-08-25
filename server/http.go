@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,15 +24,15 @@ const (
 	maxRecordingMS       = 300_000
 )
 
-//go:embed mobile/index.html mobile/app.js mobile/styles.css
+//go:embed mobile/index.html mobile/app.js mobile/lamejs.js mobile/styles.css
 var mobileAssets embed.FS
 
 type mobilePayload struct {
-	audio      []byte
-	extension  string
-	durationMS int64
-	peaks      []float64
-	language   string
+	audio       []byte
+	audioSHA256 string
+	durationMS  int64
+	peaks       []float64
+	language    string
 }
 
 func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Request) {
@@ -45,6 +47,8 @@ func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Req
 		p.serveMobileAsset(w, r, "mobile/index.html", "text/html; charset=utf-8")
 	case "/mobile/app.js":
 		p.serveMobileAsset(w, r, "mobile/app.js", "text/javascript; charset=utf-8")
+	case "/mobile/lamejs.js":
+		p.serveMobileAsset(w, r, "mobile/lamejs.js", "text/javascript; charset=utf-8")
 	case "/mobile/styles.css":
 		p.serveMobileAsset(w, r, "mobile/styles.css", "text/css; charset=utf-8")
 	case "/mobile/send":
@@ -153,14 +157,14 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 
 	fileID := claim.record.FileID
 	if fileID == "" {
-		filename := fmt.Sprintf("voice-note-%d.%s", time.Now().UnixMilli(), payload.extension)
+		filename := fmt.Sprintf("voice-note-%d.mp3", time.Now().UnixMilli())
 		fileInfo, appErr := api.UploadFile(payload.audio, target.ChannelID, filename)
 		if appErr != nil || fileInfo == nil {
 			writeJSONError(w, http.StatusBadGateway, "Mattermost could not store the recording")
 			return
 		}
 		fileID = fileInfo.Id
-		if err = tokens.attachFile(claim, fileID); err != nil {
+		if err = tokens.attachFile(claim, fileID, payload.audioSHA256, payload.durationMS, payload.peaks, payload.language); err != nil {
 			api.LogWarn(
 				"Could not save uploaded mobile voice note on its recorder token; Mattermost orphan-file cleanup may remove the file",
 				"file_id", fileID,
@@ -170,6 +174,17 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusServiceUnavailable, "the recording was stored but could not be prepared for sending; please try again")
 			return
 		}
+	} else {
+		if claim.record.AudioSHA256 == "" || claim.record.DurationMS <= 0 || len(claim.record.Peaks) == 0 || claim.record.AudioSHA256 != payload.audioSHA256 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"message":        "this recorder link is tied to a different recording; run /voice again",
+				"retry_mismatch": true,
+			})
+			return
+		}
+		payload.durationMS = claim.record.DurationMS
+		payload.peaks = append([]float64(nil), claim.record.Peaks...)
+		payload.language = claim.record.Language
 	}
 
 	post := &model.Post{
@@ -195,7 +210,10 @@ func (p *Plugin) handleMobileSend(w http.ResponseWriter, r *http.Request) {
 			"pending_post_id", claim.record.PendingPostID,
 			"error", fmt.Sprint(appErr),
 		)
-		writeJSONError(w, http.StatusBadGateway, "Mattermost could not create the voice message")
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"message":        "Mattermost could not create the voice message",
+			"retry_original": true,
+		})
 		return
 	}
 
@@ -241,14 +259,10 @@ func parseMobilePayload(r *http.Request) (mobilePayload, int, error) {
 	if err != nil {
 		return mobilePayload{}, http.StatusUnsupportedMediaType, fmt.Errorf("the recording format is not supported")
 	}
-	extension := ""
 	switch strings.ToLower(mediaType) {
-	case "audio/mp4", "audio/x-m4a", "audio/m4a":
-		extension = "m4a"
-	case "audio/webm":
-		extension = "webm"
+	case "audio/mpeg", "audio/mp3":
 	default:
-		return mobilePayload{}, http.StatusUnsupportedMediaType, fmt.Errorf("use an M4A or WebM recording")
+		return mobilePayload{}, http.StatusUnsupportedMediaType, fmt.Errorf("use an MP3 recording")
 	}
 
 	audio, err := io.ReadAll(io.LimitReader(file, maxMobileUploadBytes+1))
@@ -258,8 +272,8 @@ func parseMobilePayload(r *http.Request) (mobilePayload, int, error) {
 	if len(audio) > maxMobileUploadBytes {
 		return mobilePayload{}, http.StatusRequestEntityTooLarge, fmt.Errorf("the recording is too large")
 	}
-	if !hasAudioContainerSignature(audio, extension) {
-		return mobilePayload{}, http.StatusUnsupportedMediaType, fmt.Errorf("the recording is not a valid M4A or WebM file")
+	if !hasMP3Signature(audio) {
+		return mobilePayload{}, http.StatusUnsupportedMediaType, fmt.Errorf("the recording is not a valid MP3 file")
 	}
 
 	durationMS, err := strconv.ParseInt(r.FormValue("duration_ms"), 10, 64)
@@ -277,24 +291,18 @@ func parseMobilePayload(r *http.Request) (mobilePayload, int, error) {
 		}
 	}
 
+	digest := sha256.Sum256(audio)
 	return mobilePayload{
-		audio:      audio,
-		extension:  extension,
-		durationMS: durationMS,
-		peaks:      peaks,
-		language:   r.FormValue("language"),
+		audio:       audio,
+		audioSHA256: hex.EncodeToString(digest[:]),
+		durationMS:  durationMS,
+		peaks:       peaks,
+		language:    normalizedLanguage(r.FormValue("language")),
 	}, http.StatusOK, nil
 }
 
-func hasAudioContainerSignature(data []byte, extension string) bool {
-	switch extension {
-	case "webm":
-		return len(data) >= 4 && data[0] == 0x1a && data[1] == 0x45 && data[2] == 0xdf && data[3] == 0xa3
-	case "m4a":
-		return len(data) >= 12 && string(data[4:8]) == "ftyp"
-	default:
-		return false
-	}
+func hasMP3Signature(data []byte) bool {
+	return len(data) >= 3 && (string(data[:3]) == "ID3" || (data[0] == 0xff && data[1]&0xe0 == 0xe0))
 }
 
 func bearerToken(header string) string {
@@ -307,13 +315,24 @@ func bearerToken(header string) string {
 
 func localizedPostMessage(language string, durationMS int64) string {
 	duration := fmt.Sprintf("%d:%02d", durationMS/60_000, (durationMS/1000)%60)
-	switch strings.ToLower(strings.Split(language, "-")[0]) {
+	switch normalizedLanguage(language) {
 	case "ru":
 		return "🎤 Голосовое сообщение (" + duration + ")"
 	case "es":
 		return "🎤 Mensaje de voz (" + duration + ")"
 	default:
 		return "🎤 Voice message (" + duration + ")"
+	}
+}
+
+func normalizedLanguage(language string) string {
+	switch strings.ToLower(strings.SplitN(language, "-", 2)[0]) {
+	case "ru":
+		return "ru"
+	case "es":
+		return "es"
+	default:
+		return "en"
 	}
 }
 
