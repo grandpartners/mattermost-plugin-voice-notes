@@ -102,11 +102,23 @@
         return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
     };
 
+    const setBarLevel = (bar, value) => {
+        const level = Math.max(0.035, Math.min(1, value || 0.035));
+        bar.className = `wave-bar wave-level-${Math.round(level * 20)}`;
+    };
+
     const renderWaveform = (values) => {
-        bars.forEach((bar, index) => {
-            const value = Math.max(0.035, Math.min(1, values[index] || 0.035));
-            bar.className = `wave-bar wave-level-${Math.round(value * 20)}`;
-        });
+        bars.forEach((bar, index) => setBarLevel(bar, values[index]));
+    };
+
+    const appendLivePeak = (peak) => {
+        // Move the oldest bar itself so the history keeps its height while it
+        // travels left. Reassigning every fixed bar from the shifted samples
+        // makes the whole waveform jump vertically on every audio callback.
+        const bar = bars.shift();
+        setBarLevel(bar, peak);
+        elements.waveform.appendChild(bar);
+        bars.push(bar);
     };
 
     const downsample = (values) => {
@@ -261,8 +273,7 @@
             return;
         }
         sampleCount += float32.length;
-        const tail = samples.slice(-BAR_COUNT);
-        renderWaveform(new Array(BAR_COUNT - tail.length).fill(0.035).concat(tail));
+        appendLivePeak(peak);
 
         const elapsed = (sampleCount / audioContext.sampleRate) * 1000;
         elements.timer.textContent = formatDuration(elapsed);

@@ -133,6 +133,9 @@ func TestServeMobileRecorderUsesMP3Encoder(t *testing.T) {
 	if !strings.Contains(app, "post_status_unknown") || strings.Contains(app, "retry_original") {
 		t.Fatal("mobile recorder can retry an indeterminate CreatePost outcome")
 	}
+	if !strings.Contains(app, "const appendLivePeak") || !strings.Contains(app, "bars.shift()") || strings.Contains(app, "samples.slice(-BAR_COUNT)") {
+		t.Fatal("live waveform does not preserve bar heights while scrolling")
+	}
 
 	encoderRecorder := httptest.NewRecorder()
 	p.ServeHTTP(nil, encoderRecorder, httptest.NewRequest(http.MethodGet, "/mobile/lamejs.js", nil))
