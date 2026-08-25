@@ -18,10 +18,15 @@ import (
 type fakeMattermostAPI struct {
 	created                *model.Post
 	locale                 string
+	siteURL                string
+	teamName               string
+	requestedTeamID        string
+	rootPost               *model.Post
 	userDeleteAt           int64
 	denyPermissions        bool
 	failUpload             bool
 	failCreate             bool
+	failGetTeam            bool
 	persistOnCreateFailure bool
 	getUserCalls           int
 	uploadCalls            int
@@ -48,7 +53,10 @@ func (f *fakeMattermostAPI) LogWarn(msg string, _ ...any) {
 	f.warnings = append(f.warnings, msg)
 }
 func (f *fakeMattermostAPI) GetConfig() *model.Config {
-	siteURL := "https://mattermost.example.com"
+	siteURL := f.siteURL
+	if siteURL == "" {
+		siteURL = "https://mattermost.example.com"
+	}
 	return &model.Config{ServiceSettings: model.ServiceSettings{SiteURL: &siteURL}}
 }
 func (f *fakeMattermostAPI) GetUser(_ string) (*model.User, *model.AppError) {
@@ -59,10 +67,23 @@ func (f *fakeMattermostAPI) GetUser(_ string) (*model.User, *model.AppError) {
 	}
 	return &model.User{Locale: locale, DeleteAt: f.userDeleteAt}, nil
 }
+func (f *fakeMattermostAPI) GetTeam(teamID string) (*model.Team, *model.AppError) {
+	f.requestedTeamID = teamID
+	if f.failGetTeam {
+		return nil, model.NewAppError("test", "get team failed", nil, "", http.StatusInternalServerError)
+	}
+	name := f.teamName
+	if name == "" {
+		name = "my-team"
+	}
+	return &model.Team{Id: teamID, Name: name}, nil
+}
 func (f *fakeMattermostAPI) HasPermissionToChannel(_, _ string, _ *model.Permission) bool {
 	return !f.denyPermissions
 }
-func (f *fakeMattermostAPI) GetPost(_ string) (*model.Post, *model.AppError) { return nil, nil }
+func (f *fakeMattermostAPI) GetPost(_ string) (*model.Post, *model.AppError) {
+	return f.rootPost, nil
+}
 func (f *fakeMattermostAPI) UploadFile(data []byte, channelID, filename string) (*model.FileInfo, *model.AppError) {
 	f.uploadCalls++
 	if f.failUpload || len(data) == 0 || channelID == "" || !strings.HasSuffix(filename, ".mp3") {
@@ -173,7 +194,7 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 	api := &fakeMattermostAPI{}
 	store := newTokenStore(nil)
 	p := &Plugin{api: api, tokens: store}
-	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id"})
+	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id", TeamID: "team-id"})
 	if err != nil {
 		t.Fatalf("issue token: %v", err)
 	}
@@ -200,8 +221,11 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 	if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response["return_url"] != "mattermost://" {
-		t.Fatalf("return_url = %q, want Mattermost app root", response["return_url"])
+	if response["return_url"] != "mattermost://mattermost.example.com/my-team/pl/created-post-id" {
+		t.Fatalf("return_url = %q, want created post permalink", response["return_url"])
+	}
+	if api.requestedTeamID != "team-id" {
+		t.Fatalf("GetTeam called with %q, want saved team ID", api.requestedTeamID)
 	}
 
 	replay := newMP3UploadRequest(t, token)
@@ -209,6 +233,69 @@ func TestMobileSendCreatesPostAndRedeemsToken(t *testing.T) {
 	p.ServeHTTP(nil, replayRecorder, replay)
 	if replayRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("replay status = %d, want %d", replayRecorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestMobileSendThreadPermalinkUsesCreatedReply(t *testing.T) {
+	api := &fakeMattermostAPI{
+		teamName: "renamed-team",
+		rootPost: &model.Post{Id: "root-post-id", ChannelId: "channel-id"},
+	}
+	store := newTokenStore(nil)
+	p := &Plugin{api: api, tokens: store}
+	token, err := store.issue(recorderTarget{
+		UserID:    "user-id",
+		ChannelID: "channel-id",
+		TeamID:    "team-id",
+		RootID:    "root-post-id",
+	})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, recorder, newMP3UploadRequest(t, token))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	if api.created == nil || api.created.RootId != "root-post-id" {
+		t.Fatalf("voice post did not preserve the thread root: %#v", api.created)
+	}
+	var response map[string]string
+	if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["return_url"] != "mattermost://mattermost.example.com/renamed-team/pl/created-post-id" {
+		t.Fatalf("return_url = %q, want created reply permalink", response["return_url"])
+	}
+	if strings.Contains(response["return_url"], "root-post-id") {
+		t.Fatalf("return_url points at the thread root: %q", response["return_url"])
+	}
+}
+
+func TestMobileSendFallsBackToAppRootWhenTeamLookupFails(t *testing.T) {
+	api := &fakeMattermostAPI{failGetTeam: true}
+	store := newTokenStore(nil)
+	p := &Plugin{api: api, tokens: store}
+	token, err := store.issue(recorderTarget{UserID: "user-id", ChannelID: "channel-id", TeamID: "team-id"})
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(nil, recorder, newMP3UploadRequest(t, token))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	var response map[string]string
+	if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["return_url"] != "mattermost://" {
+		t.Fatalf("return_url = %q, want safe app-root fallback", response["return_url"])
+	}
+	if len(api.warnings) == 0 {
+		t.Fatal("permalink lookup failure was not logged")
 	}
 }
 

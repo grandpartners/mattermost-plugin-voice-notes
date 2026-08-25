@@ -31,7 +31,7 @@ This plugin solves that limitation with a small Go server component and a standa
 2. The server responds only to you with a private recorder link. The link expires after 20 minutes and can send one voice note.
 3. The recorder opens in the browser or Mattermost in-app browser, captures mono PCM with the Web Audio API and progressively encodes it to MP3 at 64 kbps. MP3 is used on every client so a note recorded on Android remains playable on iOS and vice versa. The recorder applies a five-minute client-side limit, stops capture if the page is hidden, and supports live waveform, preview, discard and send actions in English, Russian and Spanish.
 4. The server uploads the MP3 and creates a regular `custom_voice` post in the channel and thread where `/voice` was run.
-5. After a successful send, the recorder provides a `mattermost://` link back to the app.
+5. After a successful send, the recorder provides an official `mattermost://<server>/<team>/pl/<post-id>` permalink that opens the created voice message in the app. Replies open in their thread context.
 
 The recorder link is a capability credential and is not bound to the Mattermost session in the browser that opens it. Anyone who obtains the link during its 20-minute lifetime can use it to send one voice note as the user who created the link, so it must be kept secret and not shared. The raw bearer token is carried in the URL fragment and is therefore absent from the initial HTTP request; only its SHA-256 hash is stored in Mattermost KV.
 
@@ -49,7 +49,7 @@ Mobile recording additionally requires:
 - `ServiceSettings.SiteURL` set to that HTTPS URL (for example, `https://mattermost.example.com`);
 - microphone permission for the browser or Mattermost in-app browser.
 
-The command preserves the channel and thread in which it was run. The user's active status, membership, post and file-upload permissions are checked again immediately before upload. After sending, the recorder offers a `mattermost://` link back to the app.
+The command preserves the channel and thread in which it was run. The user's active status, membership, post and file-upload permissions are checked again immediately before upload. After sending, the recorder offers a `mattermost://` permalink to the newly created voice post, including for DMs, GMs and thread replies.
 
 ## Install
 

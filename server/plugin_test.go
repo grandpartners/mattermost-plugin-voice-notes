@@ -45,3 +45,18 @@ func TestConfiguredSiteURLRequiresHTTPS(t *testing.T) {
 		t.Fatalf("configuredSiteURL = %q", got)
 	}
 }
+
+func TestMattermostPostDeepLinkPreservesSiteSubpath(t *testing.T) {
+	siteURL := "https://mattermost.example.com/subpath/?ignored=yes#fragment"
+	got, err := mattermostPostDeepLink(
+		&model.Config{ServiceSettings: model.ServiceSettings{SiteURL: &siteURL}},
+		"my-team",
+		"created-post-id",
+	)
+	if err != nil {
+		t.Fatalf("mattermostPostDeepLink error: %v", err)
+	}
+	if got != "mattermost://mattermost.example.com/subpath/my-team/pl/created-post-id" {
+		t.Fatalf("mattermostPostDeepLink = %q", got)
+	}
+}
